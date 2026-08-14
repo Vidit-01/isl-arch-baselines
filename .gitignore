@@ -1,0 +1,28 @@
+# Regenerable
+ISL_DATASET/
+models/_cache/
+models/_checkpoints/
+models/_weights/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.Python
+
+# Media (clips come from Hugging Face)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Secrets
+.env
+*.token
+credentials.json
