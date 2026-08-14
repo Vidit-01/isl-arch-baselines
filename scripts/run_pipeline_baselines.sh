@@ -2,14 +2,17 @@
 # Cloud GPU pipeline: clone repo → 8-word HF dataset → landmarks → train/eval
 # every arch.md baseline → write comparison report.
 #
-# Linux VM (RunPod / Lambda / Colab terminal):
+# Linux VM (RunPod / Lambda / Lightning / Colab terminal):
 #   git clone https://github.com/Vidit-01/isl-arch-baselines.git
 #   cd isl-arch-baselines
 #   bash scripts/run_pipeline_baselines.sh
 #
 # Optional env:
-#   REPO_URL   HF_DATASET  HF_TOKEN  WORKDIR  MODELS  EPOCHS  SMOKE=1
+#   REPO_URL   HF_DATASET  HF_TOKEN  ISL_WORKDIR  MODELS  EPOCHS  SMOKE=1
 #   SKIP_CLONE=1  SKIP_HF_DOWNLOAD=1  SKIP_LANDMARKS=1  SKIP_TRAIN=1
+#
+# Do not set WORKDIR to the notebook folder (Lightning does that). This script
+# always runs from the directory that contains models/baselines/train.py.
 
 set -euo pipefail
 
@@ -27,7 +30,6 @@ else
   echo "WARNING: nvidia-smi not found (CPU training will be slow)"
 fi
 
-# System libs MediaPipe / OpenCV need on a bare Ubuntu image
 if command -v apt-get >/dev/null 2>&1 && [[ "${SKIP_APT:-0}" != "1" ]]; then
   if [[ "$(id -u)" -eq 0 ]]; then
     apt-get update -y
@@ -41,18 +43,16 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# If we are already inside a checkout, stay there unless WORKDIR is set.
-if [[ -n "${WORKDIR:-}" ]]; then
-  :
-elif [[ -f "$REPO_ROOT/models/baselines/train.py" ]]; then
-  WORKDIR="$REPO_ROOT"
+# Prefer this checkout. Lightning sets WORKDIR=/home/zeus/content — ignore it.
+if [[ -f "$REPO_ROOT/models/baselines/train.py" ]]; then
   SKIP_CLONE="${SKIP_CLONE:-1}"
-else
-  WORKDIR="${HOME}/isl-arch-baselines"
 fi
 
-PY_ARGS=(--repo-url "$REPO_URL" --workdir "$WORKDIR" --hf-dataset "$HF_DATASET" --num-frames "$NUM_FRAMES")
+PY_ARGS=(--repo-url "$REPO_URL" --hf-dataset "$HF_DATASET" --num-frames "$NUM_FRAMES")
 
+if [[ -n "${ISL_WORKDIR:-}" ]]; then
+  PY_ARGS+=(--workdir "$ISL_WORKDIR")
+fi
 if [[ -n "${GIT_BRANCH:-}" ]]; then
   PY_ARGS+=(--branch "$GIT_BRANCH")
 fi
@@ -80,10 +80,4 @@ if [[ -n "${MODELS:-}" ]]; then
   PY_ARGS+=(--models "${MODEL_ARR[@]}")
 fi
 
-# Prefer the copy inside WORKDIR after clone; fall back to this tree
-RUNNER="$REPO_ROOT/scripts/run_pipeline_baselines.py"
-if [[ -f "$WORKDIR/scripts/run_pipeline_baselines.py" ]]; then
-  RUNNER="$WORKDIR/scripts/run_pipeline_baselines.py"
-fi
-
-"$PYTHON_BIN" "$RUNNER" "${PY_ARGS[@]}"
+"$PYTHON_BIN" "$REPO_ROOT/scripts/run_pipeline_baselines.py" "${PY_ARGS[@]}"

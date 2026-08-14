@@ -7,7 +7,10 @@ Run from a GPU VM or Colab after cloning the GitHub repo (or let this script clo
   python scripts/run_pipeline_baselines.py --skip-clone     # already inside the repo
   python scripts/run_pipeline_baselines.py --models stgcn hwgat ctr_gcn
 
-Env (optional): HF_TOKEN, REPO_URL, WORKDIR, HF_DATASET
+Env (optional): HF_TOKEN, REPO_URL, ISL_WORKDIR, HF_DATASET
+
+Do not use WORKDIR — Lightning / some notebooks set that to a folder that is
+not this git checkout.
 """
 from __future__ import annotations
 
@@ -18,11 +21,18 @@ import sys
 from pathlib import Path
 
 ROOT_CANDIDATE = Path(__file__).resolve().parents[1]
+TRAIN_PY = Path("models") / "baselines" / "train.py"
+EXTRACT_PY = Path("models") / "mediapipe_transformer" / "extract_landmarks.py"
+EVAL_PY = Path("models") / "baselines" / "eval.py"
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+
+
+def is_checkout(path: Path) -> bool:
+    return (path / TRAIN_PY).is_file() and (path / EXTRACT_PY).is_file()
 
 
 def _snapshot_download(repo: str, out: Path, token: str | None) -> None:
@@ -40,7 +50,13 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Download 8-word ISL set and train arch.md baselines")
     ap.add_argument("--repo-url", default=os.getenv("REPO_URL", "https://github.com/Vidit-01/isl-arch-baselines.git"))
     ap.add_argument("--branch", default=os.getenv("GIT_BRANCH", "main"), help="Git branch to clone")
-    ap.add_argument("--workdir", default=os.getenv("WORKDIR", ""), help="Clone destination; default = this repo")
+    ap.add_argument(
+        "--workdir",
+        default=os.getenv("ISL_WORKDIR", ""),
+        help="Clone destination if this script is not already inside the repo. "
+        "Ignored when models/baselines/train.py is next to this scripts/ folder. "
+        "Do not pass Lightning's WORKDIR.",
+    )
     ap.add_argument("--hf-dataset", default=os.getenv("HF_DATASET", "vidit031/isl-isolated-8words"))
     ap.add_argument("--data-dir", default="ISL_DATASET", help="Where to put the 8-word clips")
     ap.add_argument("--models", nargs="+", default=["all"])
@@ -60,48 +76,68 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def resolve_workdir(args: argparse.Namespace) -> Path:
-    if args.workdir:
-        return Path(args.workdir).expanduser().resolve()
-    if args.skip_clone:
-        if (Path.cwd() / "models" / "baselines" / "train.py").exists():
-            return Path.cwd()
+def resolve_repo_root(args: argparse.Namespace) -> Path:
+    """Prefer the checkout that contains this file, never Lightning's WORKDIR."""
+    if is_checkout(ROOT_CANDIDATE):
         return ROOT_CANDIDATE
-    if (ROOT_CANDIDATE / "models" / "baselines" / "train.py").exists():
-        return ROOT_CANDIDATE
+    cwd = Path.cwd()
+    if is_checkout(cwd):
+        return cwd
+    explicit = (args.workdir or "").strip()
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if is_checkout(p):
+            return p
+        nested = p / "isl-arch-baselines"
+        if is_checkout(nested):
+            return nested
+        return nested if p.name != "isl-arch-baselines" else p
     return Path(os.getenv("HOME", str(Path.cwd()))) / "isl-arch-baselines"
 
 
-def clone_if_needed(repo_url: str, workdir: Path, skip: bool, branch: str = "") -> None:
+def resolve_data_dir(args: argparse.Namespace, repo_root: Path) -> Path:
+    raw = Path(args.data_dir).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    candidates = [
+        (repo_root / raw).resolve(),
+        (Path.cwd() / raw).resolve(),
+        Path("/home/zeus/content") / raw.name,
+        Path.home() / "content" / raw.name,
+    ]
+    for path in candidates:
+        if (path / "metadata.csv").exists():
+            print(f"reusing dataset at {path}")
+            return path
+    return candidates[0]
+
+
+def clone_if_needed(repo_url: str, repo_root: Path, skip: bool, branch: str = "") -> None:
+    if is_checkout(repo_root):
+        print(f"using existing checkout {repo_root}")
+        return
     if skip:
-        print(f"SKIP clone; using {workdir}")
-        return
-    if (workdir / ".git").exists():
-        print(f"Updating {workdir}")
-        _run(["git", "fetch", "--all", "--prune"], cwd=workdir)
-        try:
-            _run(["git", "pull", "--ff-only"], cwd=workdir)
-        except subprocess.CalledProcessError:
-            print("git pull --ff-only failed; continuing with local tree")
-        return
-    if (workdir / "models" / "baselines" / "train.py").exists():
-        print(f"Repo files already present at {workdir}")
-        return
-    print(f"Cloning {repo_url} -> {workdir}")
-    workdir.parent.mkdir(parents=True, exist_ok=True)
+        raise SystemExit(
+            f"SKIP clone but {repo_root} is not an isl-arch-baselines checkout "
+            f"(missing {repo_root / TRAIN_PY})"
+        )
+    print(f"Cloning {repo_url} -> {repo_root}")
+    repo_root.parent.mkdir(parents=True, exist_ok=True)
     cmd = ["git", "clone"]
     branch = (branch or os.getenv("GIT_BRANCH", "")).strip()
     if branch:
         cmd += ["--branch", branch]
-    cmd += [repo_url, str(workdir)]
+    cmd += [repo_url, str(repo_root)]
     _run(cmd)
+    if not is_checkout(repo_root):
+        raise SystemExit(f"clone finished but {repo_root / EXTRACT_PY} is missing")
 
 
-def install_deps(workdir: Path) -> None:
+def install_deps(repo_root: Path) -> None:
     py = sys.executable
     _run([py, "-m", "pip", "install", "--upgrade", "pip", "wheel"])
-    req_models = workdir / "models" / "requirements.txt"
-    req_root = workdir / "requirements.txt"
+    req_models = repo_root / "models" / "requirements.txt"
+    req_root = repo_root / "requirements.txt"
     if req_models.exists():
         _run([py, "-m", "pip", "install", "-r", str(req_models)])
     if req_root.exists():
@@ -114,16 +150,26 @@ def main() -> None:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    workdir = resolve_workdir(args)
-    clone_if_needed(args.repo_url, workdir, args.skip_clone, branch=args.branch)
-    os.chdir(workdir)
-    print(f"WORKDIR={workdir}")
+    repo_root = resolve_repo_root(args)
+    clone_if_needed(args.repo_url, repo_root, args.skip_clone, branch=args.branch)
+    os.chdir(repo_root)
+    print(f"REPO_ROOT={repo_root}")
+
+    extract = repo_root / EXTRACT_PY
+    train = repo_root / TRAIN_PY
+    if not extract.is_file() or not train.is_file():
+        raise SystemExit(
+            f"repo root is wrong: {repo_root}\n"
+            f"  extract exists={extract.is_file()} ({extract})\n"
+            f"  train exists={train.is_file()} ({train})\n"
+            f"Lightning WORKDIR is ignored; run from the isl-arch-baselines clone."
+        )
 
     if args.install_deps:
-        install_deps(workdir)
+        install_deps(repo_root)
 
     py = sys.executable
-    data_dir = (workdir / args.data_dir).resolve()
+    data_dir = resolve_data_dir(args, repo_root)
     token = os.getenv("HF_TOKEN")
 
     if not args.skip_download:
@@ -142,7 +188,6 @@ def main() -> None:
     if args.smoke:
         epochs = epochs or 3
         if models == ["all"]:
-            # RGB CNN is slow to download/init; skip on a 3-epoch probe
             models = [
                 "mp_bilstm",
                 "mp_transformer",
@@ -165,20 +210,20 @@ def main() -> None:
         _run(
             [
                 py,
-                "models/mediapipe_transformer/extract_landmarks.py",
+                str(extract),
                 "--num-frames",
                 str(args.num_frames),
                 "--data-dir",
                 str(data_dir),
             ],
-            cwd=workdir,
+            cwd=repo_root,
         )
 
     if not args.skip_train:
         print("=== Train arch.md baselines ===")
         cmd = [
             py,
-            "models/baselines/train.py",
+            str(train),
             "--data-dir",
             str(data_dir),
             "--models",
@@ -196,14 +241,14 @@ def main() -> None:
             cmd.extend(["--batch-size", str(args.batch_size)])
         if args.cpu:
             cmd.append("--cpu")
-        _run(cmd, cwd=workdir)
+        _run(cmd, cwd=repo_root)
 
         print("=== Re-eval held-out test split ===")
         eval_models = models if models != ["all"] else ["all"]
         _run(
             [
                 py,
-                "models/baselines/eval.py",
+                str(repo_root / EVAL_PY),
                 "--data-dir",
                 str(data_dir),
                 "--models",
@@ -212,16 +257,16 @@ def main() -> None:
                 str(args.seed),
                 *(["--cpu"] if args.cpu else []),
             ],
-            cwd=workdir,
+            cwd=repo_root,
         )
 
-    sys.path.insert(0, str(workdir / "models"))
+    sys.path.insert(0, str(repo_root / "models"))
     from baselines.report import write_report  # noqa: WPS433
 
     write_report()
     print("=== PIPELINE COMPLETE ===")
-    print(f"Weights + metrics: {workdir / 'models' / '_weights'}")
-    print(f"Comparison table:  {workdir / 'models' / '_weights' / 'baselines_report.md'}")
+    print(f"Weights + metrics: {repo_root / 'models' / '_weights'}")
+    print(f"Comparison table:  {repo_root / 'models' / '_weights' / 'baselines_report.md'}")
 
 
 if __name__ == "__main__":
