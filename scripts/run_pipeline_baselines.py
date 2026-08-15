@@ -1,16 +1,19 @@
-"""Cloud one-shot: download 8-word ISL set + train/eval all arch.md baselines.
+"""Cloud one-shot: download the 40-word ISL set + train/eval arch.md baselines.
 
-Run from a GPU VM or Colab after cloning the GitHub repo (or let this script clone):
+On Lightning / RunPod / Colab (from the git checkout):
 
-  python scripts/run_pipeline_baselines.py
-  python scripts/run_pipeline_baselines.py --smoke          # 3-epoch sanity check
-  python scripts/run_pipeline_baselines.py --skip-clone     # already inside the repo
-  python scripts/run_pipeline_baselines.py --models stgcn hwgat ctr_gcn
+  git pull origin main
+  python scripts/run_pipeline_baselines.py --skip-clone
 
-Env (optional): HF_TOKEN, REPO_URL, ISL_WORKDIR, HF_DATASET
+That downloads vidit031/isl-isolated-40words (~642 clips), extracts landmarks,
+keeps the 8 highest-count glosses, and trains the few-shot protocol
+(7-shot train, 15-clip locked test, 3 train-set draws).
 
-Do not use WORKDIR — Lightning / some notebooks set that to a folder that is
-not this git checkout.
+  python scripts/run_pipeline_baselines.py --skip-clone --smoke   # 3-epoch GPU check
+
+Do not use WORKDIR — Lightning sets that to a folder that is not this checkout.
+Do not --skip-download unless the 40-word folder already has ~642 mp4s.
+The old 56-clip ISL_DATASET is ignored on purpose.
 """
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ ROOT_CANDIDATE = Path(__file__).resolve().parents[1]
 TRAIN_PY = Path("models") / "baselines" / "train.py"
 EXTRACT_PY = Path("models") / "mediapipe_transformer" / "extract_landmarks.py"
 EVAL_PY = Path("models") / "baselines" / "eval.py"
+HF_40 = "vidit031/isl-isolated-40words"
+LIGHTNING_CONTENT = Path("/home/zeus/content")
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -33,6 +38,18 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
 
 def is_checkout(path: Path) -> bool:
     return (path / TRAIN_PY).is_file() and (path / EXTRACT_PY).is_file()
+
+
+def _mp4_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for _ in path.rglob("*.mp4"))
+
+
+def expected_min_mp4(hf_dataset: str) -> int:
+    if "8words" in (hf_dataset or ""):
+        return 40
+    return 400
 
 
 def _snapshot_download(repo: str, out: Path, token: str | None) -> None:
@@ -47,7 +64,9 @@ def _snapshot_download(repo: str, out: Path, token: str | None) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Download 8-word ISL set and train arch.md baselines")
+    ap = argparse.ArgumentParser(
+        description="Download 40-word ISL set and train arch.md few-shot baselines"
+    )
     ap.add_argument("--repo-url", default=os.getenv("REPO_URL", "https://github.com/Vidit-01/isl-arch-baselines.git"))
     ap.add_argument("--branch", default=os.getenv("GIT_BRANCH", "main"), help="Git branch to clone")
     ap.add_argument(
@@ -57,8 +76,13 @@ def parse_args() -> argparse.Namespace:
         "Ignored when models/baselines/train.py is next to this scripts/ folder. "
         "Do not pass Lightning's WORKDIR.",
     )
-    ap.add_argument("--hf-dataset", default=os.getenv("HF_DATASET", "vidit031/isl-isolated-40words"))
-    ap.add_argument("--data-dir", default="ISL_DATASET", help="Where to put the clips")
+    ap.add_argument("--hf-dataset", default=os.getenv("HF_DATASET", HF_40))
+    ap.add_argument(
+        "--data-dir",
+        default=os.getenv("ISL_DATA_DIR", "ISL_DATASET_40WORDS"),
+        help="Where to put the 40-word clips. Defaults to ISL_DATASET_40WORDS so the "
+        "old 56-clip ISL_DATASET is not reused.",
+    )
     ap.add_argument("--models", nargs="+", default=["all"])
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
@@ -71,7 +95,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--smoke", action="store_true", help="3 epochs, skip RGB CNN, single train draw")
-    ap.add_argument("--draws", type=int, default=1, help="k-shot train draws (1 on the 56-clip set; 3+ when leftover > k)")
+    ap.add_argument(
+        "--draws",
+        type=int,
+        default=3,
+        help="k-shot train draws (default 3 on the 40-word set; smoke forces 1)",
+    )
     ap.add_argument("--train-shots", type=int, default=7)
     ap.add_argument("--val-shots", type=int, default=1)
     ap.add_argument("--test-per-class", type=int, default=15, help="Locked test clips per word")
@@ -83,6 +112,8 @@ def parse_args() -> argparse.Namespace:
         help="Override class list. Default: top --n-words by clip count. 'all' or 'legacy8' also valid.",
     )
     ap.add_argument("--strict-protocol", action="store_true")
+    ap.add_argument("--git-pull", action="store_true", default=True, help="git pull when already cloned")
+    ap.add_argument("--no-git-pull", action="store_false", dest="git_pull")
     ap.add_argument("--install-deps", action="store_true", default=True)
     ap.add_argument("--no-install-deps", action="store_false", dest="install_deps")
     return ap.parse_args()
@@ -107,21 +138,42 @@ def resolve_repo_root(args: argparse.Namespace) -> Path:
     return Path(os.getenv("HOME", str(Path.cwd()))) / "isl-arch-baselines"
 
 
-def resolve_data_dir(args: argparse.Namespace, repo_root: Path) -> Path:
+def resolve_data_dir(args: argparse.Namespace, repo_root: Path, min_mp4: int) -> Path:
+    """Pick a 40-word folder. Ignore leftover 8-word / 7-cap ISL_DATASET copies."""
     raw = Path(args.data_dir).expanduser()
     if raw.is_absolute():
         return raw.resolve()
+
     candidates = [
         (repo_root / raw).resolve(),
         (Path.cwd() / raw).resolve(),
-        Path("/home/zeus/content") / raw.name,
+        LIGHTNING_CONTENT / raw.name,
         Path.home() / "content" / raw.name,
+        Path("/teamspace/studios/this_studio") / raw.name,
     ]
+    if LIGHTNING_CONTENT.is_dir():
+        candidates.insert(0, (LIGHTNING_CONTENT / raw.name).resolve())
+
     for path in candidates:
-        if (path / "metadata.csv").exists():
-            print(f"reusing dataset at {path}")
+        n = _mp4_count(path)
+        if (path / "metadata.csv").exists() and n >= min_mp4:
+            print(f"reusing dataset at {path} ({n} mp4)")
             return path
+        if (path / "metadata.csv").exists():
+            print(f"ignoring undersized dataset at {path} ({n} mp4, need >={min_mp4})")
+
+    if LIGHTNING_CONTENT.is_dir():
+        dest = (LIGHTNING_CONTENT / raw.name).resolve()
+        print(f"Lightning: downloading into {dest}")
+        return dest
     return candidates[0]
+
+
+def git_pull_checkout(repo_root: Path, branch: str) -> None:
+    try:
+        _run(["git", "-C", str(repo_root), "pull", "--ff-only"])
+    except subprocess.CalledProcessError as exc:
+        print(f"WARNING: git pull failed ({exc}); continuing with local checkout")
 
 
 def clone_if_needed(repo_url: str, repo_root: Path, skip: bool, branch: str = "") -> None:
@@ -163,7 +215,10 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     repo_root = resolve_repo_root(args)
+    already_cloned = is_checkout(repo_root)
     clone_if_needed(args.repo_url, repo_root, args.skip_clone, branch=args.branch)
+    if args.git_pull and already_cloned:
+        git_pull_checkout(repo_root, args.branch)
     os.chdir(repo_root)
     print(f"REPO_ROOT={repo_root}")
 
@@ -181,7 +236,8 @@ def main() -> None:
         install_deps(repo_root)
 
     py = sys.executable
-    data_dir = resolve_data_dir(args, repo_root)
+    min_mp4 = expected_min_mp4(args.hf_dataset)
+    data_dir = resolve_data_dir(args, repo_root, min_mp4)
     token = os.getenv("HF_TOKEN")
 
     if not args.skip_download:
@@ -190,10 +246,14 @@ def main() -> None:
     meta = data_dir / "metadata.csv"
     if not meta.exists():
         raise SystemExit(f"missing {meta} — download failed or --data-dir is wrong")
-    n_mp4 = sum(1 for _ in data_dir.rglob("*.mp4"))
-    print(f"mp4 count={n_mp4}  metadata={meta.exists()}")
-    if n_mp4 < 8:
-        raise SystemExit(f"too few videos ({n_mp4}). Check HF LFS / HF_TOKEN.")
+    n_mp4 = _mp4_count(data_dir)
+    print(f"mp4 count={n_mp4}  metadata={meta.exists()}  data_dir={data_dir}")
+    if n_mp4 < min_mp4:
+        raise SystemExit(
+            f"{data_dir} has only {n_mp4} mp4s (need >={min_mp4} for {args.hf_dataset}).\n"
+            f"Do not --skip-download over the old 8-word folder. Re-run without "
+            f"--skip-download, or pass --data-dir ISL_DATASET_40WORDS."
+        )
 
     models = list(args.models)
     epochs = args.epochs
@@ -233,7 +293,7 @@ def main() -> None:
         )
 
     if not args.skip_train:
-        print("=== Train arch.md baselines ===")
+        print("=== Train arch.md baselines (few-shot, top-count words) ===")
         cmd = [
             py,
             str(train),
@@ -286,6 +346,10 @@ def main() -> None:
                 str(args.seed),
                 "--protocol",
                 "fewshot",
+                "--n-words",
+                str(args.n_words),
+                "--test-per-class",
+                str(args.test_per_class),
                 *(["--cpu"] if args.cpu else []),
             ],
             cwd=repo_root,
@@ -298,6 +362,7 @@ def main() -> None:
     print("=== PIPELINE COMPLETE ===")
     print(f"Weights + metrics: {repo_root / 'models' / '_weights'}")
     print(f"Comparison table:  {repo_root / 'models' / '_weights' / 'baselines_report.md'}")
+    print(f"Dataset:           {data_dir}  ({n_mp4} mp4)")
 
 
 if __name__ == "__main__":

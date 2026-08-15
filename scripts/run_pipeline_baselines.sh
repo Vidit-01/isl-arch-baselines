@@ -19,8 +19,15 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/Vidit-01/isl-arch-baselines.git}"
 HF_DATASET="${HF_DATASET:-vidit031/isl-isolated-40words}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  PYTHON_BIN="${PYTHON_BIN:-python}"
+fi
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
 NUM_FRAMES="${NUM_FRAMES:-30}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
+DATA_DIR="${ISL_DATA_DIR:-ISL_DATASET_40WORDS}"
 
 echo "=== ISL arch.md baselines pipeline ==="
 
@@ -48,7 +55,7 @@ if [[ -f "$REPO_ROOT/models/baselines/train.py" ]]; then
   SKIP_CLONE="${SKIP_CLONE:-1}"
 fi
 
-PY_ARGS=(--repo-url "$REPO_URL" --hf-dataset "$HF_DATASET" --num-frames "$NUM_FRAMES")
+PY_ARGS=(--repo-url "$REPO_URL" --hf-dataset "$HF_DATASET" --num-frames "$NUM_FRAMES" --data-dir "$DATA_DIR")
 
 if [[ -n "${ISL_WORKDIR:-}" ]]; then
   PY_ARGS+=(--workdir "$ISL_WORKDIR")

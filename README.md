@@ -6,7 +6,21 @@ Videos are **not** in this repo. The cloud script downloads [`vidit031/isl-isola
 
 Architecture notes: [`models/baselines/arch.md`](models/baselines/arch.md).
 
-## Cloud GPU (RunPod / Lambda / Colab)
+## Cloud GPU (Lightning / RunPod / Lambda / Colab)
+
+The pipeline downloads the **40-word** Hub set, ignores any leftover 56-clip `ISL_DATASET`, picks the 8 highest-count glosses, and trains the few-shot protocol (7-shot train, 15-clip test, 3 draws).
+
+**Lightning AI** (existing clone):
+
+```bash
+cd /teamspace/studios/this_studio/isl-arch-baselines
+git pull origin main
+python scripts/run_pipeline_baselines.py --skip-clone
+```
+
+First run will download ~642 clips into `/home/zeus/content/ISL_DATASET_40WORDS` (not the old `ISL_DATASET`), extract MediaPipe landmarks, then train. Do **not** pass `--skip-download` or `--data-dir /home/zeus/content/ISL_DATASET` — that folder is the small 8-word copy.
+
+Fresh VM:
 
 ```bash
 git clone https://github.com/Vidit-01/isl-arch-baselines.git
@@ -22,12 +36,10 @@ Colab:
 !python scripts/run_pipeline_baselines.py --skip-clone
 ```
 
-That run: install deps → download the 40-word set → extract MediaPipe landmarks → train all models under the **few-shot protocol** on the 8 highest-count glosses (locked 15-clip test, k-shot train) → re-eval that test split → write `baselines_report.md`.
-
-Quick GPU check (3 epochs, skip RGB CNN):
+Quick GPU check (3 epochs, skip RGB CNN, 1 draw):
 
 ```bash
-SMOKE=1 bash scripts/run_pipeline_baselines.sh
+python scripts/run_pipeline_baselines.py --skip-clone --smoke
 ```
 
 If the Hugging Face dataset is private: `export HF_TOKEN=hf_...`
