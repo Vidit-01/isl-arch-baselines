@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
         "Ignored when models/baselines/train.py is next to this scripts/ folder. "
         "Do not pass Lightning's WORKDIR.",
     )
-    ap.add_argument("--hf-dataset", default=os.getenv("HF_DATASET", "vidit031/isl-isolated-8words"))
-    ap.add_argument("--data-dir", default="ISL_DATASET", help="Where to put the 8-word clips")
+    ap.add_argument("--hf-dataset", default=os.getenv("HF_DATASET", "vidit031/isl-isolated-40words"))
+    ap.add_argument("--data-dir", default="ISL_DATASET", help="Where to put the clips")
     ap.add_argument("--models", nargs="+", default=["all"])
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=None)
@@ -75,6 +75,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--train-shots", type=int, default=7)
     ap.add_argument("--val-shots", type=int, default=1)
     ap.add_argument("--test-per-class", type=int, default=15, help="Locked test clips per word")
+    ap.add_argument("--n-words", type=int, default=8, help="Keep this many highest-count classes")
+    ap.add_argument(
+        "--words",
+        nargs="+",
+        default=None,
+        help="Override class list. Default: top --n-words by clip count. 'all' or 'legacy8' also valid.",
+    )
     ap.add_argument("--strict-protocol", action="store_true")
     ap.add_argument("--install-deps", action="store_true", default=True)
     ap.add_argument("--no-install-deps", action="store_false", dest="install_deps")
@@ -250,7 +257,11 @@ def main() -> None:
             str(args.val_shots),
             "--test-per-class",
             str(args.test_per_class),
+            "--n-words",
+            str(args.n_words),
         ]
+        if args.words:
+            cmd.extend(["--words", *args.words])
         if epochs is not None:
             cmd.extend(["--epochs", str(epochs)])
         if args.batch_size is not None:

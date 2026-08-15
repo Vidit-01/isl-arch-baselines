@@ -9,7 +9,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 from baselines.metrics import mcnemar_exact, score_split, wilson_interval
-from baselines.protocol import fewshot_protocol_split, protocol_meets_spec
+from baselines.protocol import fewshot_protocol_split, protocol_meets_spec, resolve_words, top_words
 
 
 def _pool(n_users: int, words: list[str]) -> pd.DataFrame:
@@ -56,6 +56,19 @@ def main() -> None:
     assert set(t0["video_path"]) != set(t1["video_path"]), "draws should resample train"
     assert not p0["leakage"]["train_test"]
     print("large-pool OK", p0["per_class"]["eat"])
+
+    ranked = pd.DataFrame(
+        {
+            "word": ["hello"] * 36 + ["friend"] * 38 + ["eat"] * 7 + ["sit"] * 19,
+            "signer": [f"User{i:03d}" for i in range(36 + 38 + 7 + 19)],
+            "video_path": [f"c{i}.mp4" for i in range(36 + 38 + 7 + 19)],
+            "abs_path": [f"/d/c{i}.mp4" for i in range(36 + 38 + 7 + 19)],
+            "original_filename": [f"c{i}.mp4" for i in range(36 + 38 + 7 + 19)],
+        }
+    )
+    assert top_words(ranked, 3) == ["friend", "hello", "sit"]
+    assert resolve_words(None, ranked, n_words=3) == ["friend", "hello", "sit"]
+    assert resolve_words(["top2"], ranked) == ["friend", "hello"]
 
     w = wilson_interval(18, 20)
     assert 0.0 <= w["low"] <= w["p"] <= w["high"] <= 1.0

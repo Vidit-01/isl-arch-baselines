@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Cloud GPU pipeline: clone repo → 8-word HF dataset → landmarks → train/eval
-# every arch.md baseline → write comparison report.
+# Cloud GPU pipeline: clone repo → 40-word HF dataset → landmarks → train/eval
+# every arch.md baseline on the 8 highest-count glosses → write comparison report.
 #
 # Linux VM (RunPod / Lambda / Lightning / Colab terminal):
 #   git clone https://github.com/Vidit-01/isl-arch-baselines.git
@@ -8,7 +8,7 @@
 #   bash scripts/run_pipeline_baselines.sh
 #
 # Optional env:
-#   REPO_URL   HF_DATASET  HF_TOKEN  ISL_WORKDIR  MODELS  EPOCHS  DRAWS  TEST_PER_CLASS  SMOKE=1
+#   REPO_URL   HF_DATASET  HF_TOKEN  ISL_WORKDIR  MODELS  EPOCHS  DRAWS  TEST_PER_CLASS  N_WORDS  SMOKE=1
 #   SKIP_CLONE=1  SKIP_HF_DOWNLOAD=1  SKIP_LANDMARKS=1  SKIP_TRAIN=1
 #
 # Do not set WORKDIR to the notebook folder (Lightning does that). This script
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/Vidit-01/isl-arch-baselines.git}"
-HF_DATASET="${HF_DATASET:-vidit031/isl-isolated-8words}"
+HF_DATASET="${HF_DATASET:-vidit031/isl-isolated-40words}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 NUM_FRAMES="${NUM_FRAMES:-30}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
@@ -84,6 +84,14 @@ if [[ -n "${DRAWS:-}" ]]; then
 fi
 if [[ -n "${TEST_PER_CLASS:-}" ]]; then
   PY_ARGS+=(--test-per-class "$TEST_PER_CLASS")
+fi
+if [[ -n "${N_WORDS:-}" ]]; then
+  PY_ARGS+=(--n-words "$N_WORDS")
+fi
+if [[ -n "${WORDS:-}" ]]; then
+  # shellcheck disable=SC2206
+  WORD_ARR=($WORDS)
+  PY_ARGS+=(--words "${WORD_ARR[@]}")
 fi
 if [[ "${STRICT_PROTOCOL:-0}" == "1" ]]; then
   PY_ARGS+=(--strict-protocol)

@@ -9,9 +9,102 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-EIGHT_WORDS = ("eat", "go", "hello", "help", "no", "please", "water", "yes")
+EIGHT_WORDS = ("eat", "go", "hello", "help", "no", "please", "water", "yes")  # legacy smoke set
 _USER = re.compile(r"^User\d+", re.I)
 _SESSION = re.compile(r"session(\d+)", re.I)
+_TOP = re.compile(r"^top(\d+)?$", re.I)
+
+
+def _token(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+
+def clip_counts(df: pd.DataFrame) -> pd.Series:
+    return df.groupby("word").size().sort_values(ascending=False)
+
+
+def top_words(df: pd.DataFrame, k: int = 8) -> list[str]:
+    """Highest-count glosses in `df`, ties broken alphabetically."""
+    counts = df.groupby("word").size()
+    ranked = sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+    return [str(w) for w, _ in ranked[: max(0, int(k))]]
+
+
+def align_words(requested: list[str], df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Map CLI tokens (hello, thank_you) onto metadata `word` labels. Returns (found, missing)."""
+    alias: dict[str, str] = {}
+    for w in df["word"].astype(str).unique():
+        alias[_token(w)] = w
+        alias[w.lower()] = w
+        alias[w.lower().replace(" ", "_")] = w
+    if "normalized_word" in df.columns:
+        for orig, norm in zip(df["word"].astype(str), df["normalized_word"].astype(str)):
+            alias[_token(norm)] = orig
+    found: list[str] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for raw in requested:
+        key = _token(raw)
+        hit = alias.get(key) or alias.get(raw.strip().lower())
+        if hit is None:
+            missing.append(raw)
+            continue
+        if hit not in seen:
+            found.append(hit)
+            seen.add(hit)
+    return found, missing
+
+
+def resolve_words(
+    raw: list[str] | None,
+    df: pd.DataFrame | None = None,
+    n_words: int = 8,
+) -> list[str] | None:
+    """Choose glosses. Default / `top` / `top8`: the n_words classes with the most clips.
+
+    `all` → every class (return None). `legacy8` → original eat/go/hello/… set.
+    None return means 'do not filter'.
+    """
+    if df is None:
+        if not raw:
+            return list(EIGHT_WORDS)
+        if len(raw) == 1 and raw[0].lower() in {"all", "*"}:
+            return None
+        if len(raw) == 1 and raw[0].lower() in {"legacy8", "eight", "old8"}:
+            return list(EIGHT_WORDS)
+        return [w.strip().lower() for w in raw]
+
+    if not raw:
+        return top_words(df, n_words)
+
+    token0 = str(raw[0]).strip().lower()
+    if len(raw) == 1 and token0 in {"all", "*"}:
+        return None
+    if len(raw) == 1 and token0 in {"legacy8", "eight", "old8"}:
+        found, missing = align_words(list(EIGHT_WORDS), df)
+        if missing:
+            print(f"WARNING: legacy8 words missing from metadata: {missing}")
+        return found
+    if len(raw) == 1 and _TOP.match(token0):
+        m = _TOP.match(token0)
+        k = int(m.group(1) or n_words)
+        return top_words(df, k)
+    if len(raw) == 1 and token0 in {"top"}:
+        return top_words(df, n_words)
+
+    found, missing = align_words(raw, df)
+    if missing:
+        print(f"WARNING: words not in metadata: {missing}")
+    return found
+
+
+def print_word_choice(df: pd.DataFrame, words: list[str] | None) -> None:
+    counts = df.groupby("word").size()
+    chosen = list(words) if words is not None else sorted(counts.index.astype(str).tolist())
+    print(f"selected {len(chosen)} word(s) (by clip count):")
+    print(f"{'word':16s} {'n':>5s}")
+    for w in chosen:
+        print(f"{w:16s} {int(counts.get(w, 0)):5d}")
 
 
 def identity_key(row: pd.Series) -> str:
@@ -29,14 +122,6 @@ def identity_key(row: pd.Series) -> str:
     if m:
         return f"session:{m.group(1)}"
     return f"clip:{row.get('video_path')}"
-
-
-def resolve_words(raw: list[str] | None, available: list[str] | None = None) -> list[str] | None:
-    if not raw:
-        return list(EIGHT_WORDS)
-    if len(raw) == 1 and raw[0].lower() in {"all", "*"}:
-        return None if available is None else sorted(set(available))
-    return [w.strip().lower() for w in raw]
 
 
 def _coverage(work: pd.DataFrame, ids: set[str]) -> dict[str, int]:
@@ -114,7 +199,7 @@ def fewshot_protocol_split(
     val_shots: int = 1,
     protocol_seed: int = 42,
     draw_seed: int = 42,
-    words: tuple[str, ...] | list[str] | None = EIGHT_WORDS,
+    words: tuple[str, ...] | list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Lock a balanced test set, then draw k-shot train (+ val) from the rest.
 
@@ -257,10 +342,10 @@ def print_split_audit(audit: dict[str, Any]) -> None:
         f"sizes train={audit['split_sizes']['train']} val={audit['split_sizes']['val']} "
         f"test={audit['split_sizes']['test']}"
     )
-    print(f"{'word':12s} {'pool':>4s} {'train':>5s} {'val':>4s} {'test':>4s}")
+    print(f"{'word':16s} {'pool':>4s} {'train':>5s} {'val':>4s} {'test':>4s}")
     for word, row in audit["per_class"].items():
         print(
-            f"{word:12s} {row['n_pool']:4d} {row['n_train']:5d} {row['n_val']:4d} {row['n_test']:4d}"
+            f"{word:16s} {row['n_pool']:4d} {row['n_train']:5d} {row['n_val']:4d} {row['n_test']:4d}"
         )
     for w in audit.get("warnings") or []:
         print(f"WARNING: {w}")

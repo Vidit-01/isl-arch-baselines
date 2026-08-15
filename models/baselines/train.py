@@ -38,6 +38,7 @@ from baselines.metrics import mean_std  # noqa: E402
 from baselines.protocol import (  # noqa: E402
     fewshot_protocol_split,
     print_split_audit,
+    print_word_choice,
     protocol_meets_spec,
     resolve_words,
     save_protocol,
@@ -80,7 +81,14 @@ def parse_args() -> argparse.Namespace:
         "--words",
         nargs="+",
         default=None,
-        help="Glosses to keep (default: 8-word set). Pass 'all' for every class in metadata.",
+        help="Glosses to keep. Default: the --n-words classes with the most clips. "
+        "'top8', 'all', or 'legacy8' (eat/go/hello/…). Use thank_you for 'thank you'.",
+    )
+    ap.add_argument(
+        "--n-words",
+        type=int,
+        default=8,
+        help="How many highest-count classes to keep when --words is omitted or 'top'",
     )
     ap.add_argument(
         "--strict-protocol",
@@ -140,12 +148,10 @@ def main() -> None:
     print(f"dataset={data_dir}")
 
     df = load_metadata(min_clips=args.min_clips, dataset_dir=data_dir)
-    words = resolve_words(args.words, df["word"].tolist())
+    words = resolve_words(args.words, df, n_words=args.n_words)
+    print_word_choice(df, words)
     if words:
-        missing = [w for w in words if w not in set(df["word"].tolist())]
         df = df[df["word"].isin(words)].copy()
-        if missing:
-            print(f"WARNING: words not in metadata: {missing}")
         if df.empty:
             raise SystemExit(f"no clips left after --words {words}")
 

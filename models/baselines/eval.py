@@ -52,6 +52,7 @@ def main() -> None:
     ap.add_argument("--val-shots", type=int, default=1)
     ap.add_argument("--test-per-class", type=int, default=15)
     ap.add_argument("--words", nargs="+", default=None)
+    ap.add_argument("--n-words", type=int, default=8)
     ap.add_argument("--n-boot", type=int, default=2000)
     args = ap.parse_args()
 
@@ -61,14 +62,18 @@ def main() -> None:
     data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else default_dataset_dir()
 
     df = load_metadata(min_clips=args.min_clips, dataset_dir=data_dir)
-    words = resolve_words(args.words, df["word"].tolist())
+    proto = load_protocol(WEIGHTS_DIR / "fewshot_protocol.json")
+    if args.words is None and proto and proto.get("words"):
+        words = list(proto["words"])
+        print("words from fewshot_protocol.json:", ", ".join(words))
+    else:
+        words = resolve_words(args.words, df, n_words=args.n_words)
     if words:
         df = df[df["word"].isin(words)].copy()
     w2i, i2w = build_label_maps(df["word"].tolist())
     df["y"] = df["word"].map(w2i)
     class_names = [i2w[i] for i in range(len(i2w))]
 
-    proto = load_protocol(WEIGHTS_DIR / "fewshot_protocol.json")
     if args.protocol == "fewshot" and proto and proto.get("locked_test_paths"):
         test_df = frame_from_paths(df, proto["locked_test_paths"])
         print(f"locked test from fewshot_protocol.json  n={len(test_df)}")
