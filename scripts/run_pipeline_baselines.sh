@@ -8,7 +8,7 @@
 #   bash scripts/run_pipeline_baselines.sh
 #
 # Optional env:
-#   REPO_URL   HF_DATASET  HF_TOKEN  ISL_WORKDIR  MODELS  EPOCHS  SMOKE=1
+#   REPO_URL   HF_DATASET  HF_TOKEN  ISL_WORKDIR  MODELS  EPOCHS  DRAWS  SMOKE=1
 #   SKIP_CLONE=1  SKIP_HF_DOWNLOAD=1  SKIP_LANDMARKS=1  SKIP_TRAIN=1
 #
 # Do not set WORKDIR to the notebook folder (Lightning does that). This script
@@ -78,6 +78,12 @@ if [[ -n "${MODELS:-}" ]]; then
   # shellcheck disable=SC2206
   MODEL_ARR=($MODELS)
   PY_ARGS+=(--models "${MODEL_ARR[@]}")
+fi
+if [[ -n "${DRAWS:-}" ]]; then
+  PY_ARGS+=(--draws "$DRAWS")
+fi
+if [[ "${STRICT_PROTOCOL:-0}" == "1" ]]; then
+  PY_ARGS+=(--strict-protocol)
 fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/run_pipeline_baselines.py" "${PY_ARGS[@]}"

@@ -22,6 +22,7 @@ from .data import (
     fft_transform,
     pose_hands_transform,
 )
+from .metrics import score_split
 from .registry import BaselineSpec, get_spec
 
 
@@ -148,11 +149,13 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         test_loader: DataLoader,
+        out_dir: Optional[Path] = None,
+        n_boot: int = 2000,
     ) -> dict[str, Any]:
         name = self.spec.name
         epochs = int(self.cfg["epochs"])
         patience = int(self.cfg.get("patience") or 0)
-        weights_dir = WEIGHTS_DIR / name
+        weights_dir = Path(out_dir) if out_dir is not None else WEIGHTS_DIR / name
         weights_dir.mkdir(parents=True, exist_ok=True)
         log_path = weights_dir / "train.log"
         append_train_log(
@@ -222,12 +225,33 @@ class Trainer:
             use_amp=self.use_amp,
             desc=f"{name} test",
         )
+        test["best_val_acc"] = float(best_acc)
+        test["val_test_gap"] = float(best_acc) - float(test["acc"])
+        id_to_word = self.labels.get("id_to_word") or {}
+        class_names = [
+            str(id_to_word.get(str(i), id_to_word.get(i, i)))
+            for i in range(int(self.labels["num_classes"]))
+        ]
+        scored = score_split(
+            test["labels"],
+            test["preds"],
+            class_names,
+            best_val_acc=best_acc,
+            n_boot=n_boot,
+        )
+        test.update({k: v for k, v in scored.items() if k not in ("preds", "labels")})
         append_train_log(
             log_path,
-            f"[{name}] TEST acc={test['acc']:.3f} loss={test['loss']:.4f} n={test['n']} best_val={best_acc:.3f}",
+            f"[{name}] TEST acc={test['acc']:.3f} macro_f1={scored['macro_f1']['point']:.3f} "
+            f"loss={test['loss']:.4f} n={test['n']} best_val={best_acc:.3f} "
+            f"val-test gap={test['val_test_gap']:.3f}",
         )
 
-        ckpt_dir = CHECKPOINT_DIR / name
+        try:
+            ckpt_rel = weights_dir.relative_to(WEIGHTS_DIR)
+        except ValueError:
+            ckpt_rel = Path(name)
+        ckpt_dir = CHECKPOINT_DIR / ckpt_rel
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         torch.save({"state_dict": self.model.state_dict(), "best_val_acc": best_acc}, ckpt_dir / "best.pt")
 
@@ -272,6 +296,8 @@ def train_one_baseline(
     labels: dict[str, Any],
     device: torch.device,
     overrides: Optional[dict[str, Any]] = None,
+    out_dir: Optional[Path] = None,
+    n_boot: int = 2000,
 ) -> dict[str, Any]:
     spec = get_spec(name)
     cfg = merge_cfg(spec, overrides)
@@ -282,4 +308,4 @@ def train_one_baseline(
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"params={n_params:,}  device={device}")
     trainer = Trainer(spec, model, cfg, labels, device, train_df["y"].tolist())
-    return trainer.fit(*loaders)
+    return trainer.fit(*loaders, out_dir=out_dir, n_boot=n_boot)

@@ -70,7 +70,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--skip-landmarks", action="store_true")
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--cpu", action="store_true")
-    ap.add_argument("--smoke", action="store_true", help="3 epochs, skip RGB CNN (quick GPU check)")
+    ap.add_argument("--smoke", action="store_true", help="3 epochs, skip RGB CNN, single train draw")
+    ap.add_argument("--draws", type=int, default=1, help="k-shot train draws (1 on the 56-clip set; 3+ when leftover > k)")
+    ap.add_argument("--train-shots", type=int, default=7)
+    ap.add_argument("--val-shots", type=int, default=1)
+    ap.add_argument("--test-per-class", type=int, default=20)
+    ap.add_argument("--strict-protocol", action="store_true")
     ap.add_argument("--install-deps", action="store_true", default=True)
     ap.add_argument("--no-install-deps", action="store_false", dest="install_deps")
     return ap.parse_args()
@@ -185,6 +190,7 @@ def main() -> None:
 
     models = list(args.models)
     epochs = args.epochs
+    draws = 1 if args.smoke else int(args.draws)
     if args.smoke:
         epochs = epochs or 3
         if models == ["all"]:
@@ -234,6 +240,16 @@ def main() -> None:
             str(workers),
             "--seed",
             str(args.seed),
+            "--protocol",
+            "fewshot",
+            "--draws",
+            str(draws),
+            "--train-shots",
+            str(args.train_shots),
+            "--val-shots",
+            str(args.val_shots),
+            "--test-per-class",
+            str(args.test_per_class),
         ]
         if epochs is not None:
             cmd.extend(["--epochs", str(epochs)])
@@ -241,9 +257,11 @@ def main() -> None:
             cmd.extend(["--batch-size", str(args.batch_size)])
         if args.cpu:
             cmd.append("--cpu")
+        if args.strict_protocol:
+            cmd.append("--strict-protocol")
         _run(cmd, cwd=repo_root)
 
-        print("=== Re-eval held-out test split ===")
+        print("=== Re-eval locked few-shot test split ===")
         eval_models = models if models != ["all"] else ["all"]
         _run(
             [
@@ -255,6 +273,8 @@ def main() -> None:
                 *eval_models,
                 "--seed",
                 str(args.seed),
+                "--protocol",
+                "fewshot",
                 *(["--cpu"] if args.cpu else []),
             ],
             cwd=repo_root,
