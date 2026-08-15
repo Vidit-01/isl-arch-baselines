@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--train-shots", type=int, default=7, help="Training clips per word")
     ap.add_argument("--val-shots", type=int, default=1, help="Val clips per word (from leftover)")
-    ap.add_argument("--test-per-class", type=int, default=20, help="Locked test clips per word")
+    ap.add_argument("--test-per-class", type=int, default=15, help="Locked test clips per word")
     ap.add_argument(
         "--draws",
         type=int,

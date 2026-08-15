@@ -110,7 +110,7 @@ def _draw_from_indices(
 def fewshot_protocol_split(
     df: pd.DataFrame,
     train_shots: int = 7,
-    test_per_class: int = 20,
+    test_per_class: int = 15,
     val_shots: int = 1,
     protocol_seed: int = 42,
     draw_seed: int = 42,
@@ -121,7 +121,7 @@ def fewshot_protocol_split(
     Identities (signer, else session) are partitioned **globally** so the same
     person cannot be train on one gloss and test on another. Test assignment
     uses `protocol_seed`; train resampling uses `draw_seed`. If the pool is too
-    small for 20 test clips / class, take as many as remain after reserving
+    small for 15 test clips / class, take as many as remain after reserving
     train+val — do not silently reuse signers.
     """
     work = df.copy()
@@ -243,7 +243,7 @@ def frame_from_paths(df: pd.DataFrame, paths: list[str]) -> pd.DataFrame:
     return df.loc[idx].reset_index(drop=True)
 
 
-def protocol_meets_spec(audit: dict[str, Any], test_per_class: int = 20) -> bool:
+def protocol_meets_spec(audit: dict[str, Any], test_per_class: int = 15) -> bool:
     per = audit.get("per_class") or {}
     if not per:
         return False

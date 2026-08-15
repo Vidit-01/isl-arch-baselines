@@ -172,7 +172,7 @@ def write_report(weights_dir: Path | None = None) -> Path:
             lines.append("")
         warns = proto.get("warnings") or []
         if warns:
-            lines.append("**Split warnings** (current 8-word pool is 7 clips/word — 20-shot test is not reachable until more videos are added):")
+            lines.append("**Split warnings** (15 test clips/word needs leftover after train+val; the 7-clip 8-word set cannot reach that):")
             lines.append("")
             for wnote in warns:
                 lines.append(f"- {wnote}")

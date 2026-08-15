@@ -50,7 +50,7 @@ def main() -> None:
     ap.add_argument("--protocol", choices=["fewshot", "stratified"], default="fewshot")
     ap.add_argument("--train-shots", type=int, default=7)
     ap.add_argument("--val-shots", type=int, default=1)
-    ap.add_argument("--test-per-class", type=int, default=20)
+    ap.add_argument("--test-per-class", type=int, default=15)
     ap.add_argument("--words", nargs="+", default=None)
     ap.add_argument("--n-boot", type=int, default=2000)
     args = ap.parse_args()

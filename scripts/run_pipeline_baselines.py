@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--draws", type=int, default=1, help="k-shot train draws (1 on the 56-clip set; 3+ when leftover > k)")
     ap.add_argument("--train-shots", type=int, default=7)
     ap.add_argument("--val-shots", type=int, default=1)
-    ap.add_argument("--test-per-class", type=int, default=20)
+    ap.add_argument("--test-per-class", type=int, default=15, help="Locked test clips per word")
     ap.add_argument("--strict-protocol", action="store_true")
     ap.add_argument("--install-deps", action="store_true", default=True)
     ap.add_argument("--no-install-deps", action="store_false", dest="install_deps")

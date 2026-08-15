@@ -56,14 +56,14 @@ python scripts/run_pipeline_baselines.py --skip-clone --models stgcn hwgat ctr_g
 
 Default split is **not** a random 70/15/15. `train.py --protocol fewshot` (the default):
 
-1. **Lock a balanced test set first** (target 20 clips/word), identity-disjoint from train/val. Grouping key is `User00x` when present, else `sessionN` in the path, else the clip itself.
+1. **Lock a balanced test set first** (target 15 clips/word), identity-disjoint from train/val. Grouping key is `User00x` when present, else `sessionN` in the path, else the clip itself.
 2. **Draw 6–7 training clips/word** from the leftover pool. If that pool is larger than k, run several draws (`--draws 3`) and report mean ± std. Same locked test every draw so model comparisons stay paired.
 3. **Val** is 1 leftover clip/word (needed for the val→test gap).
 4. **Metrics:** per-class accuracy, macro-F1 as the headline, Wilson CIs on accuracy, bootstrap CIs on macro-F1 / macro-acc, McNemar + paired bootstrap when comparing models. Log **val−test gap** — that is the overfitting signal under scarcity.
 
-`--strict-protocol` exits if any class has fewer than 20 test clips.
+`--strict-protocol` exits if any class has fewer than 15 test clips.
 
-**Current 8-word Hugging Face set has 7 clips/word.** You cannot fill train 6–7 **and** test 20. The trainer degrades (typically train 5 / val 1 / test 1 per word), prints warnings, and will not silently claim a 20-shot test. Add more cross-signer clips before treating numbers as a real few-shot SLR result. On this 56-clip pool extra draws train the same leftover clips — the pipeline defaults to `--draws 1`. Use `--draws 3` once the leftover pool is larger than k.
+**Current 8-word Hugging Face set has 7 clips/word.** You cannot fill train 6–7 **and** test 15. The trainer degrades (typically train 5 / val 1 / test 1 per word), prints warnings, and will not silently claim a 15-shot test. Prefer the full 40-word set (`vidit031/isl-isolated-40words`, 642 clips) — on the eight protocol glosses that yields train 7 / val 1 and test 8–15 (`hello` reaches 15). On the 56-clip pool extra draws train the same leftover clips — the pipeline defaults to `--draws 1`. Use `--draws 3` once the leftover pool is larger than k.
 
 Read the comparison on **which model degrades most gracefully**, not peak point accuracy. Raw-pixel `cnn_bilstm` is expected to fall hardest; landmark / spectral inputs should hold up better.
 
@@ -71,8 +71,9 @@ Read the comparison on **which model degrades most gracefully**, not peak point 
 # honest run on today's 56 clips (degraded test size, warnings in the report)
 python models/baselines/train.py --data-dir ISL_DATASET --models all --draws 1
 
-# real protocol once you have ≥ ~28 clips/word
-python models/baselines/train.py --data-dir ISL_DATASET --draws 3 --train-shots 7 --test-per-class 20 --strict-protocol
+# 40-word corpus (15-shot test where the pool allows)
+python scripts/download_hf_dataset.py --repo vidit031/isl-isolated-40words --out ISL_DATASET_40WORDS
+python models/baselines/train.py --data-dir ISL_DATASET_40WORDS --words eat go hello help no please water yes --draws 3 --train-shots 7 --test-per-class 15
 ```
 
 Old random split: `--protocol stratified`.

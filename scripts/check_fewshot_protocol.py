@@ -34,7 +34,7 @@ def main() -> None:
     _, _, _, a0 = fewshot_protocol_split(df, protocol_seed=42, draw_seed=42)
     _, _, _, a1 = fewshot_protocol_split(df, protocol_seed=42, draw_seed=1051)
     assert a0["test_paths"] == a1["test_paths"], "locked test must be stable"
-    assert not protocol_meets_spec(a0, 20)
+    assert not protocol_meets_spec(a0, 15)
     assert not a0["leakage"]["train_test"], a0["leakage"]
     assert not a0["leakage"]["val_test"], a0["leakage"]
     pc = a0["per_class"]["eat"]
@@ -51,7 +51,8 @@ def main() -> None:
         big, protocol_seed=0, draw_seed=2, words=["eat", "go"]
     )
     assert p0["test_paths"] == p1["test_paths"]
-    assert protocol_meets_spec(p0, 20)
+    assert protocol_meets_spec(p0, 15)
+    assert p0["per_class"]["eat"]["n_test"] == 15
     assert set(t0["video_path"]) != set(t1["video_path"]), "draws should resample train"
     assert not p0["leakage"]["train_test"]
     print("large-pool OK", p0["per_class"]["eat"])
