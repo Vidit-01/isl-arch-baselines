@@ -89,7 +89,8 @@ class TransformerClassifier(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, enable_nested_tensor=False)
         self.cls = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, num_classes))
 
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(self.pos(self.input_proj(x)))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.pos(self.input_proj(x))
-        h = self.encoder(h)
-        return self.cls(h.mean(dim=1))
+        return self.cls(self.encode(x).mean(dim=1))

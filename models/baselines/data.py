@@ -121,7 +121,7 @@ class SkeletonDataset(LandmarkSeqDataset):
 
 
 class KDFSkeletonDataset(LandmarkSeqDataset):
-    """Kalman pose + part-wise Hankel-DMD: ((C,T,V), eig, modes) for kdf_stgcn."""
+    """MediaPipe pose+hands sequence + cached Hankel-DMD features for kdf_stgcn."""
 
     def __getitem__(self, idx):
         seq = load_or_extract(
@@ -133,25 +133,25 @@ class KDFSkeletonDataset(LandmarkSeqDataset):
         extra = self.cache_dir.parent / f"{CACHE_TAG}_T{self.num_frames}_m{N_MODES}"
         extra.mkdir(parents=True, exist_ok=True)
         feat_path = extra / f"{Path(self.paths[idx]).stem}.npz"
-        x = eig = modes = None
+        pose = pose_hands_vec(seq)
+        eig = modes = None
         if feat_path.exists():
             blob = np.load(feat_path)
             if "x" in blob and "eig" in blob and "modes" in blob and blob["x"].shape[0] == KDF_IN_CHANNELS:
-                x = blob["x"].astype(np.float32)
                 eig = blob["eig"].astype(np.float32)
                 modes = blob["modes"].astype(np.float32)
-        if x is None:
+        if eig is None:
             joints = landmarks_to_joints(seq)
-            x, eig, modes = kdf_joint_features(joints)
-            np.savez_compressed(feat_path, x=x, eig=eig, modes=modes)
+            x_out, eig, modes = kdf_joint_features(joints)
+            np.savez_compressed(feat_path, x=x_out, eig=eig, modes=modes)
         if self.augment:
             if np.random.rand() < 0.5:
-                x = x + np.random.normal(0, 0.01, size=x.shape).astype(np.float32)
+                pose = pose + np.random.normal(0, 0.01, size=pose.shape).astype(np.float32)
             if np.random.rand() < 0.5:
-                shift = int(np.random.randint(0, x.shape[1]))
-                x = np.roll(x, shift, axis=1)
+                shift = int(np.random.randint(0, pose.shape[0]))
+                pose = np.roll(pose, shift, axis=0)
         return (
-            torch.from_numpy(np.ascontiguousarray(x)),
+            torch.from_numpy(np.ascontiguousarray(pose)),
             torch.from_numpy(np.ascontiguousarray(eig)),
             torch.from_numpy(np.ascontiguousarray(modes)),
             torch.tensor(self.labels[idx], dtype=torch.long),

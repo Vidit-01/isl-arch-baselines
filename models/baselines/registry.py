@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 import torch.nn as nn
 
 from .skeleton import IN_CHANNELS, N_JOINTS
-from .kdf_stgcn import KDF_IN_CHANNELS, N_MODES, kdf_forward
+from .kdf_stgcn import N_MODES, kdf_forward
 
 POSE_HANDS_DIM = (33 + 21 + 21) * 3  # drop face mesh
 JOINT_FLAT_DIM = N_JOINTS * IN_CHANNELS
@@ -31,6 +31,7 @@ TRAIN_KEYS = {
     "mixup",
     "label_smoothing",
     "d_model",
+    "koopman_weight",
 }
 
 
@@ -173,15 +174,16 @@ def _kdf_stgcn(num_classes: int, cfg: dict) -> nn.Module:
 
     return KDFSTGCN(
         num_classes=num_classes,
-        in_channels=int(cfg.get("in_channels", KDF_IN_CHANNELS)),
+        feat_dim=int(cfg.get("feat_dim", POSE_HANDS_DIM)),
         n_modes=int(cfg.get("n_modes", N_MODES)),
         eig_hidden=int(cfg.get("eig_hidden", 64)),
         d_model=int(cfg.get("d_model", 128)),
         nhead=int(cfg.get("nhead", 4)),
-        layers=int(cfg.get("layers", 2)),
-        dropout=float(cfg.get("dropout", 0.25)),
+        layers=int(cfg.get("layers", 3)),
+        dropout=float(cfg.get("dropout", 0.2)),
         mixup=float(cfg.get("mixup", 0.2)),
         label_smoothing=float(cfg.get("label_smoothing", 0.1)),
+        koopman_weight=float(cfg.get("koopman_weight", 0.3)),
     )
 
 
@@ -310,22 +312,21 @@ SPECS: dict[str, BaselineSpec] = {
     ),
     "kdf_stgcn": BaselineSpec(
         "kdf_stgcn",
-        "Koopman / Hankel-DMD + kinematic fusion (ST-GCN)",
+        "Hankel-DMD / Koopman + MediaPipe Transformer",
         "skeleton_kdf",
         _kdf_stgcn,
         defaults=dict(
-            _GRAPH,
-            in_channels=KDF_IN_CHANNELS,
+            _SEQ,
+            feat_dim=POSE_HANDS_DIM,
             n_modes=N_MODES,
             eig_hidden=64,
             d_model=128,
             nhead=4,
-            layers=2,
-            dropout=0.25,
+            layers=3,
+            dropout=0.2,
             mixup=0.2,
             label_smoothing=0.1,
-            weight_decay=2e-2,
-            lr=1e-3,
+            koopman_weight=0.3,
         ),
         family="novel",
         forward_fn=kdf_forward,

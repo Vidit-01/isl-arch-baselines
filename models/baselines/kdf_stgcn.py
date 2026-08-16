@@ -1,9 +1,14 @@
-"""Kinematic + part-wise Hankel-DMD / Koopman fusion (proposed ISL model).
+"""Hankel-DMD / Koopman features on the MediaPipe Transformer backbone.
 
-Koopman / Hankel-DMD features are unchanged (kdfv2 cache). The classifier is not
-a 2M ST-GCN+GAP+FiLM stack — that overfit 7-shot (val−test gap ~0.33). v3 is a
-compact joint+bone graph encoder that keeps time, a temporal transformer (the
-family that actually wins this protocol), and concat fusion of Koopman tokens.
+Koopman extraction (Kalman, part-wise Hankel-DMD, eigenvalues, spatial modes)
+is unchanged. The classifier is no longer a GCN: few-shot SLR here is won by
+mp_transformer, and the Koopman literature treats the operator as a plug-in
+on a strong sequence backbone.
+
+  Wang et al., CVPR 2023, Neural Koopman Pooling — class-wise Koopman matrices
+  as dynamical templates; DMD matching for one-shot skeleton recognition.
+  Zhang et al., 2021, Action recognition based on DMD — concat DMD spectrum
+  with a learned encoder; helps quasi-few-shot when CNNs cannot be trained well.
 """
 from __future__ import annotations
 
@@ -12,9 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .heads import PositionalEncoding
-from .skeleton import N_JOINTS, PARTS, bone_pairs, spatial_partition_adjacency
-from .stgcn import STGCNBlock
+from .heads import TransformerClassifier
+from .skeleton import N_JOINTS, PARTS
 
 CACHE_TAG = "kdfv2"
 N_MODES = 3  # per body part
@@ -217,56 +221,63 @@ def kdf_joint_features(
     return x, eig.astype(np.float32), mode_map.astype(np.float32)
 
 
+class ClassKoopmanHead(nn.Module):
+    """Low-rank class-wise Koopman templates (Wang et al., CVPR 2023).
+
+    Each class is a linear map K_c ≈ U_c V_c^T on transformer tokens.
+    Score is negative reconstruction error of h_{t+1} ≈ K_c h_t.
+    """
+
+    def __init__(self, d_model: int, num_classes: int, rank: int = 8):
+        super().__init__()
+        self.U = nn.Parameter(torch.randn(num_classes, d_model, rank) * 0.02)
+        self.V = nn.Parameter(torch.randn(num_classes, d_model, rank) * 0.02)
+
+    def scores(self, tokens: torch.Tensor) -> torch.Tensor:
+        h0, h1 = tokens[:, :-1], tokens[:, 1:]
+        u = F.normalize(self.U, dim=1)
+        v = F.normalize(self.V, dim=1)
+        z = torch.einsum("ntd,cdr->nctr", h0, v)
+        pred = torch.einsum("nctr,cdr->nctd", z, u)
+        err = (pred - h1.unsqueeze(1)).pow(2).mean(dim=(2, 3))
+        return -err
+
+
 class KDFSTGCN(nn.Module):
-    """Shared joint/bone GCN (no temporal stride) + transformer + Koopman concat."""
+    """mp_transformer backbone + Hankel-DMD concat + class-wise Koopman matching."""
 
     def __init__(
         self,
         num_classes: int,
+        feat_dim: int = 225,
         in_channels: int = KDF_IN_CHANNELS,
         n_modes: int = N_MODES,
         eig_hidden: int = 64,
         d_model: int = 128,
         nhead: int = 4,
-        layers: int = 2,
-        dropout: float = 0.25,
+        layers: int = 3,
+        dropout: float = 0.2,
         mixup: float = 0.2,
         label_smoothing: float = 0.1,
+        koopman_weight: float = 0.3,
+        koopman_rank: int = 8,
         **_ignored,
     ):
         super().__init__()
         self.n_modes = int(n_modes)
         self.mixup = float(mixup)
         self.label_smoothing = float(label_smoothing)
-        a = torch.from_numpy(spatial_partition_adjacency())
-        self.data_bn = nn.BatchNorm1d(in_channels * N_JOINTS)
-        self.gcn = nn.Sequential(
-            STGCNBlock(in_channels, 64, a, residual=False, dropout=dropout),
-            STGCNBlock(64, 64, a, dropout=dropout),
-            STGCNBlock(64, 128, a, dropout=dropout),
-        )
-        self.stream_fuse = nn.Sequential(
-            nn.Conv2d(256, 128, kernel_size=1),
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-        )
-        self.part_fuse = nn.Sequential(
-            nn.Conv1d(128 * N_PARTS, d_model, kernel_size=1),
-            nn.BatchNorm1d(d_model),
-            nn.GELU(),
-        )
-        self.pos = PositionalEncoding(d_model, max_len=64, dropout=dropout)
-        enc = nn.TransformerEncoderLayer(
+        self.koopman_weight = float(koopman_weight)
+        self.seq = TransformerClassifier(
+            feat_dim=int(feat_dim),
+            num_classes=num_classes,
             d_model=d_model,
             nhead=nhead,
+            num_layers=int(layers),
             dim_feedforward=d_model * 2,
             dropout=dropout,
-            batch_first=True,
-            activation="gelu",
-            norm_first=True,
+            max_len=128,
         )
-        self.temporal = nn.TransformerEncoder(enc, num_layers=int(layers), enable_nested_tensor=False)
-        self.pool_score = nn.Linear(d_model, 1)
         mode_in = N_PARTS * MODE_MAP_DIM
         self.mode_mlp = nn.Sequential(
             nn.LayerNorm(mode_in),
@@ -287,51 +298,37 @@ class KDFSTGCN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(d_model + 128, num_classes),
         )
-        pairs = bone_pairs()
-        self.register_buffer("_bone_src", torch.tensor([p for p, _ in pairs], dtype=torch.long), persistent=False)
-        self.register_buffer("_bone_dst", torch.tensor([c for _, c in pairs], dtype=torch.long), persistent=False)
+        self.koopman = ClassKoopmanHead(d_model, num_classes, rank=int(koopman_rank))
+        self.dyn_scale = nn.Parameter(torch.tensor(0.5))
         for name in PART_ORDER:
             self.register_buffer(f"_idx_{name}", torch.tensor(PARTS[name], dtype=torch.long), persistent=False)
-
-    def _bones(self, x: torch.Tensor) -> torch.Tensor:
-        bone = torch.zeros_like(x)
-        for src, dst in zip(self._bone_src.tolist(), self._bone_dst.tolist()):
-            bone[:, :, :, dst] = x[:, :, :, dst] - x[:, :, :, src]
-        return bone
-
-    def _part_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        chunks = [x.index_select(-1, getattr(self, f"_idx_{name}")).mean(-1) for name in PART_ORDER]
-        stacked = torch.cat(chunks, dim=1)  # (N, 128*P, T)
-        return self.part_fuse(stacked).transpose(1, 2)  # (N, T, d_model)
 
     def _part_mode_vec(self, modes: torch.Tensor) -> torch.Tensor:
         parts = [modes.index_select(1, getattr(self, f"_idx_{name}")).mean(1) for name in PART_ORDER]
         return torch.cat(parts, dim=-1)
-
-    def encode_motion(self, x: torch.Tensor) -> torch.Tensor:
-        n, c, t, v = x.shape
-        x = self.data_bn(x.reshape(n, c * v, t)).reshape(n, c, t, v)
-        joint = self.gcn(x)
-        bone = self.gcn(self._bones(x))
-        fused = self.stream_fuse(torch.cat([joint, bone], dim=1))
-        tokens = self.pos(self._part_tokens(fused))
-        tokens = self.temporal(tokens)
-        weights = torch.softmax(self.pool_score(tokens), dim=1)
-        return (tokens * weights).sum(dim=1) + tokens.mean(dim=1)
 
     def forward(
         self,
         x: torch.Tensor,
         eig: torch.Tensor | None = None,
         modes: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        kin = self.encode_motion(x)
+        return_aux: bool = False,
+    ):
+        if x.dim() == 4:
+            n, c, t, v = x.shape
+            x = x.permute(0, 2, 1, 3).reshape(n, t, c * v)
+        tokens = self.seq.encode(x)
+        pooled = tokens.mean(dim=1)
         if eig is None:
             eig = x.new_zeros(x.size(0), EIG_DIM)
         if modes is None:
             modes = x.new_zeros(x.size(0), N_JOINTS, MODE_MAP_DIM)
         dyn = torch.cat([self.eig_mlp(eig), self.mode_mlp(self._part_mode_vec(modes))], dim=-1)
-        return self.head(torch.cat([kin, dyn], dim=-1))
+        k_scores = self.koopman.scores(tokens)
+        logits = self.head(torch.cat([pooled, dyn], dim=-1)) + self.dyn_scale * k_scores
+        if return_aux:
+            return logits, k_scores
+        return logits
 
 
 def _ce(logits, y, criterion, smoothing: float):
@@ -344,34 +341,44 @@ def _ce(logits, y, criterion, smoothing: float):
 
 
 def kdf_forward(model, batch, criterion, device, train: bool = True):
-    """Unpack (pose, koopman_eigs, spatial_modes); mixup while training."""
+    """Unpack (landmark sequence, koopman eigs, spatial modes); mixup while training."""
     x, y = batch
     if isinstance(x, (tuple, list)):
-        joints, eig = x[0], x[1]
+        pose, eig = x[0], x[1]
         modes = x[2] if len(x) > 2 else None
-        joints = joints.to(device, non_blocking=True)
+        pose = pose.to(device, non_blocking=True)
         eig = eig.to(device, non_blocking=True)
         if modes is not None:
             modes = modes.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
     else:
-        joints = x.to(device, non_blocking=True)
+        pose = x.to(device, non_blocking=True)
         eig, modes = None, None
         y = y.to(device, non_blocking=True)
 
     mix = float(getattr(model, "mixup", 0.0) or 0.0) if train and model.training else 0.0
     smooth = float(getattr(model, "label_smoothing", 0.0) or 0.0) if train else 0.0
-    if mix > 0.0 and joints.size(0) > 1:
+    kw = float(getattr(model, "koopman_weight", 0.0) or 0.0) if train else 0.0
+
+    def _loss(logits, aux, target):
+        loss = _ce(logits, target, criterion, smooth)
+        if aux is not None and kw > 0:
+            loss = loss + kw * _ce(aux, target, criterion, 0.0)
+        return loss
+
+    if mix > 0.0 and pose.size(0) > 1:
         lam = float(np.random.beta(mix, mix))
-        idx = torch.randperm(joints.size(0), device=device)
-        joints = lam * joints + (1.0 - lam) * joints[idx]
+        idx = torch.randperm(pose.size(0), device=device)
+        pose = lam * pose + (1.0 - lam) * pose[idx]
         if eig is not None:
             eig = lam * eig + (1.0 - lam) * eig[idx]
         if modes is not None:
             modes = lam * modes + (1.0 - lam) * modes[idx]
-        logits = model(joints, eig, modes)
-        loss = lam * _ce(logits, y, criterion, smooth) + (1.0 - lam) * _ce(logits, y[idx], criterion, smooth)
+        out = model(pose, eig, modes, return_aux=True)
+        logits, aux = out if isinstance(out, tuple) else (out, None)
+        loss = lam * _loss(logits, aux, y) + (1.0 - lam) * _loss(logits, aux, y[idx])
         return logits, y, loss
 
-    logits = model(joints, eig, modes)
-    return logits, y, _ce(logits, y, criterion, smooth)
+    out = model(pose, eig, modes, return_aux=train)
+    logits, aux = out if isinstance(out, tuple) else (out, None)
+    return logits, y, _loss(logits, aux, y)
