@@ -43,7 +43,7 @@ from baselines.protocol import (  # noqa: E402
     resolve_words,
     save_protocol,
 )
-from baselines.registry import ALL_NAMES, SPECS  # noqa: E402
+from baselines.registry import ALL_NAMES, SPECS, canonical_name  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,7 +105,7 @@ def resolve_names(raw: list[str]) -> list[str]:
         return list(ALL_NAMES)
     names = []
     for n in raw:
-        n = n.strip().lower().replace("-", "_")
+        n = canonical_name(n.strip().lower().replace("-", "_"))
         if n not in SPECS:
             known = ", ".join(ALL_NAMES)
             raise SystemExit(f"Unknown model '{n}'. Choose from: {known}")

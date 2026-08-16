@@ -57,20 +57,20 @@ If the Hugging Face dataset is private: `export HF_TOKEN=hf_...`
 | `fft_bilstm` | FFT + kinematic + BiLSTM |
 | `cwt_bilstm` / `cwt_transformer` | CWT + BiLSTM / Transformer |
 | `pgf_slr` | Graph-Fourier attention (PGF-SLR-style) |
-| `kdf_stgcn` | **Novel:** Kalman + Hankel-DMD / Koopman eigenvalues fused with pos/vel/acc into ST-GCN |
+| `kdf_transformer` | **Novel:** Hankel-DMD / Koopman spectrum + class-wise Koopman matching on the MediaPipe Transformer |
 
 **Novel model only** (same few-shot protocol as the baselines, so scores are comparable):
 
 ```bash
 cd /teamspace/studios/this_studio/isl-arch-baselines
 git pull origin main
-python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn
+python scripts/run_pipeline_baselines.py --skip-clone --models kdf_transformer
 ```
 
 3-epoch GPU check of the novel model:
 
 ```bash
-python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn --smoke
+python scripts/run_pipeline_baselines.py --skip-clone --models kdf_transformer --smoke
 ```
 
 If a previous download died on Hugging Face HTTP 429, re-run the same command (it resumes). Do not pass `--skip-download` unless `/home/zeus/content/ISL_DATASET_40WORDS` already has ~642 mp4s.

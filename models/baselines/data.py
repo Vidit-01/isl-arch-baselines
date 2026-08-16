@@ -121,7 +121,7 @@ class SkeletonDataset(LandmarkSeqDataset):
 
 
 class KDFSkeletonDataset(LandmarkSeqDataset):
-    """MediaPipe pose+hands sequence + cached Hankel-DMD features for kdf_stgcn."""
+    """MediaPipe pose+hands sequence + cached Hankel-DMD features for kdf_transformer."""
 
     def __getitem__(self, idx):
         seq = load_or_extract(

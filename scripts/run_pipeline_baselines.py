@@ -9,7 +9,7 @@ That downloads vidit031/isl-isolated-40words (~642 clips), extracts landmarks,
 keeps the 8 highest-count glosses, and trains the few-shot protocol
 (7-shot train, 15-clip locked test, 3 train-set draws).
 
-  python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn
+  python scripts/run_pipeline_baselines.py --skip-clone --models kdf_transformer
   python scripts/run_pipeline_baselines.py --skip-clone --smoke   # 3-epoch GPU check
 
 Do not use WORKDIR — Lightning sets that to a folder that is not this checkout.
@@ -310,7 +310,7 @@ def main() -> None:
                 "cwt_bilstm",
                 "cwt_transformer",
                 "pgf_slr",
-                "kdf_stgcn",
+                "kdf_transformer",
             ]
 
     workers = args.num_workers

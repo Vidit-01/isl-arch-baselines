@@ -36,7 +36,7 @@ from baselines.protocol import (  # noqa: E402
     print_split_audit,
     resolve_words,
 )
-from baselines.registry import ALL_NAMES, get_spec  # noqa: E402
+from baselines.registry import ALL_NAMES, canonical_name, get_spec  # noqa: E402
 
 
 def main() -> None:
@@ -56,7 +56,7 @@ def main() -> None:
     ap.add_argument("--n-boot", type=int, default=2000)
     args = ap.parse_args()
 
-    names = list(ALL_NAMES) if args.models == ["all"] else [n.strip().lower().replace("-", "_") for n in args.models]
+    names = list(ALL_NAMES) if args.models == ["all"] else [canonical_name(n) for n in args.models]
     set_seed(args.seed)
     device = torch.device("cpu") if args.cpu else configure_cuda_gpu()
     data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else default_dataset_dir()

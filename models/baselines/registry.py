@@ -310,8 +310,8 @@ SPECS: dict[str, BaselineSpec] = {
         forward_fn=_pgf_forward,
         use_amp=False,
     ),
-    "kdf_stgcn": BaselineSpec(
-        "kdf_stgcn",
+    "kdf_transformer": BaselineSpec(
+        "kdf_transformer",
         "Hankel-DMD / Koopman + MediaPipe Transformer",
         "skeleton_kdf",
         _kdf_stgcn,
@@ -334,9 +334,16 @@ SPECS: dict[str, BaselineSpec] = {
 }
 
 ALL_NAMES: tuple[str, ...] = tuple(SPECS.keys())
+ALIASES = {"kdf_stgcn": "kdf_transformer"}
+
+
+def canonical_name(name: str) -> str:
+    n = name.strip().lower().replace("-", "_")
+    return ALIASES.get(n, n)
 
 
 def get_spec(name: str) -> BaselineSpec:
+    name = canonical_name(name)
     if name not in SPECS:
         known = ", ".join(ALL_NAMES)
         raise KeyError(f"Unknown baseline '{name}'. Choose from: {known}")
