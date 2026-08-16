@@ -1,9 +1,9 @@
-"""Kinematic + part-wise Hankel-DMD / Koopman fusion into ST-GCN (proposed ISL model).
+"""Kinematic + part-wise Hankel-DMD / Koopman fusion (proposed ISL model).
 
-v2 (after the first few-shot run overfit: val−test gap 0.36, worse than ST-GCN):
-  ST-GCN stays on 3-channel Kalman-normalized pose — not 21 fused channels.
-  Spatial graph modes enter as a zero-init residual; Koopman eigenvalues FiLM
-  the pooled embedding (identity at init). Mixup + label smoothing for 7-shot.
+Koopman / Hankel-DMD features are unchanged (kdfv2 cache). The classifier is not
+a 2M ST-GCN+GAP+FiLM stack — that overfit 7-shot (val−test gap ~0.33). v3 is a
+compact joint+bone graph encoder that keeps time, a temporal transformer (the
+family that actually wins this protocol), and concat fusion of Koopman tokens.
 """
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .skeleton import PARTS
-from .stgcn import STGCN
+from .heads import PositionalEncoding
+from .skeleton import N_JOINTS, PARTS, bone_pairs, spatial_partition_adjacency
+from .stgcn import STGCNBlock
 
 CACHE_TAG = "kdfv2"
 N_MODES = 3  # per body part
@@ -25,7 +26,6 @@ KDF_IN_CHANNELS = KIN_CHANNELS
 FEAT_PER_MODE = 4  # log1p|λ|, sin θ, cos θ, RMS amplitude
 EIG_DIM = N_PARTS * N_MODES * FEAT_PER_MODE + N_PARTS
 MODE_MAP_DIM = N_PARTS * N_MODES  # 9 spatial-mode channels over joints
-FEAT_DIM = 256
 
 
 def _kalman_nd(z: np.ndarray, q: float = 8e-4, r: float = 1.5e-2) -> np.ndarray:
@@ -218,7 +218,7 @@ def kdf_joint_features(
 
 
 class KDFSTGCN(nn.Module):
-    """ST-GCN on 3-ch pose; spatial DMD residual + Koopman FiLM (identity at init)."""
+    """Shared joint/bone GCN (no temporal stride) + transformer + Koopman concat."""
 
     def __init__(
         self,
@@ -226,8 +226,11 @@ class KDFSTGCN(nn.Module):
         in_channels: int = KDF_IN_CHANNELS,
         n_modes: int = N_MODES,
         eig_hidden: int = 64,
-        dropout: float = 0.35,
-        mixup: float = 0.4,
+        d_model: int = 128,
+        nhead: int = 4,
+        layers: int = 2,
+        dropout: float = 0.25,
+        mixup: float = 0.2,
         label_smoothing: float = 0.1,
         **_ignored,
     ):
@@ -235,32 +238,86 @@ class KDFSTGCN(nn.Module):
         self.n_modes = int(n_modes)
         self.mixup = float(mixup)
         self.label_smoothing = float(label_smoothing)
-        self.backbone = STGCN(num_classes=num_classes, in_channels=in_channels, dropout=dropout)
-        self.mode_lift = nn.Conv2d(MODE_MAP_DIM, in_channels, kernel_size=1, bias=True)
-        nn.init.zeros_(self.mode_lift.weight)
-        nn.init.zeros_(self.mode_lift.bias)
-        self.film = nn.Sequential(
+        a = torch.from_numpy(spatial_partition_adjacency())
+        self.data_bn = nn.BatchNorm1d(in_channels * N_JOINTS)
+        self.gcn = nn.Sequential(
+            STGCNBlock(in_channels, 64, a, residual=False, dropout=dropout),
+            STGCNBlock(64, 64, a, dropout=dropout),
+            STGCNBlock(64, 128, a, dropout=dropout),
+        )
+        self.stream_fuse = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+        )
+        self.part_fuse = nn.Sequential(
+            nn.Conv1d(128 * N_PARTS, d_model, kernel_size=1),
+            nn.BatchNorm1d(d_model),
+            nn.GELU(),
+        )
+        self.pos = PositionalEncoding(d_model, max_len=64, dropout=dropout)
+        enc = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_model * 2,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
+        )
+        self.temporal = nn.TransformerEncoder(enc, num_layers=int(layers), enable_nested_tensor=False)
+        self.pool_score = nn.Linear(d_model, 1)
+        mode_in = N_PARTS * MODE_MAP_DIM
+        self.mode_mlp = nn.Sequential(
+            nn.LayerNorm(mode_in),
+            nn.Linear(mode_in, eig_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(eig_hidden, 64),
+        )
+        self.eig_mlp = nn.Sequential(
             nn.LayerNorm(EIG_DIM),
             nn.Linear(EIG_DIM, eig_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(eig_hidden, FEAT_DIM * 2),
+            nn.Linear(eig_hidden, 64),
         )
-        nn.init.zeros_(self.film[-1].weight)
-        nn.init.zeros_(self.film[-1].bias)
         self.head = nn.Sequential(
+            nn.LayerNorm(d_model + 128),
             nn.Dropout(dropout),
-            nn.Linear(FEAT_DIM, num_classes),
+            nn.Linear(d_model + 128, num_classes),
         )
+        pairs = bone_pairs()
+        self.register_buffer("_bone_src", torch.tensor([p for p, _ in pairs], dtype=torch.long), persistent=False)
+        self.register_buffer("_bone_dst", torch.tensor([c for _, c in pairs], dtype=torch.long), persistent=False)
+        for name in PART_ORDER:
+            self.register_buffer(f"_idx_{name}", torch.tensor(PARTS[name], dtype=torch.long), persistent=False)
 
-    def encode(self, x: torch.Tensor, modes: torch.Tensor | None = None) -> torch.Tensor:
+    def _bones(self, x: torch.Tensor) -> torch.Tensor:
+        bone = torch.zeros_like(x)
+        for src, dst in zip(self._bone_src.tolist(), self._bone_dst.tolist()):
+            bone[:, :, :, dst] = x[:, :, :, dst] - x[:, :, :, src]
+        return bone
+
+    def _part_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        chunks = [x.index_select(-1, getattr(self, f"_idx_{name}")).mean(-1) for name in PART_ORDER]
+        stacked = torch.cat(chunks, dim=1)  # (N, 128*P, T)
+        return self.part_fuse(stacked).transpose(1, 2)  # (N, T, d_model)
+
+    def _part_mode_vec(self, modes: torch.Tensor) -> torch.Tensor:
+        parts = [modes.index_select(1, getattr(self, f"_idx_{name}")).mean(1) for name in PART_ORDER]
+        return torch.cat(parts, dim=-1)
+
+    def encode_motion(self, x: torch.Tensor) -> torch.Tensor:
         n, c, t, v = x.shape
-        if modes is not None:
-            lifted = self.mode_lift(modes.permute(0, 2, 1).unsqueeze(2).expand(-1, -1, t, -1))
-            x = x + lifted
-        x = self.backbone.data_bn(x.reshape(n, c * v, t)).reshape(n, c, t, v)
-        x = self.backbone.blocks(x)
-        return F.adaptive_avg_pool2d(x, 1).reshape(n, -1)
+        x = self.data_bn(x.reshape(n, c * v, t)).reshape(n, c, t, v)
+        joint = self.gcn(x)
+        bone = self.gcn(self._bones(x))
+        fused = self.stream_fuse(torch.cat([joint, bone], dim=1))
+        tokens = self.pos(self._part_tokens(fused))
+        tokens = self.temporal(tokens)
+        weights = torch.softmax(self.pool_score(tokens), dim=1)
+        return (tokens * weights).sum(dim=1) + tokens.mean(dim=1)
 
     def forward(
         self,
@@ -268,11 +325,13 @@ class KDFSTGCN(nn.Module):
         eig: torch.Tensor | None = None,
         modes: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        feat = self.encode(x, modes)
-        if eig is not None:
-            gamma, beta = self.film(eig).chunk(2, dim=-1)
-            feat = feat * (1.0 + torch.tanh(gamma)) + beta
-        return self.head(feat)
+        kin = self.encode_motion(x)
+        if eig is None:
+            eig = x.new_zeros(x.size(0), EIG_DIM)
+        if modes is None:
+            modes = x.new_zeros(x.size(0), N_JOINTS, MODE_MAP_DIM)
+        dyn = torch.cat([self.eig_mlp(eig), self.mode_mlp(self._part_mode_vec(modes))], dim=-1)
+        return self.head(torch.cat([kin, dyn], dim=-1))
 
 
 def _ce(logits, y, criterion, smoothing: float):
