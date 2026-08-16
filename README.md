@@ -1,6 +1,6 @@
 # ISL arch.md baselines
 
-Train the nine-family ISL recognition baselines (11 checkpoints) on isolated ISL.
+Train the nine-family ISL recognition baselines plus the novel Koopman/Hankel-DMD fusion model on isolated ISL.
 
 Videos are **not** in this repo. The cloud script downloads [`vidit031/isl-isolated-40words`](https://huggingface.co/datasets/vidit031/isl-isolated-40words) (642 clips, 40 glosses) and **keeps the 8 classes with the most videos** — not a fixed random 8-word list.
 
@@ -57,8 +57,25 @@ If the Hugging Face dataset is private: `export HF_TOKEN=hf_...`
 | `fft_bilstm` | FFT + kinematic + BiLSTM |
 | `cwt_bilstm` / `cwt_transformer` | CWT + BiLSTM / Transformer |
 | `pgf_slr` | Graph-Fourier attention (PGF-SLR-style) |
+| `kdf_stgcn` | **Novel:** Kalman + Hankel-DMD / Koopman eigenvalues fused with pos/vel/acc into ST-GCN |
 
-Subset:
+**Novel model only** (same few-shot protocol as the baselines, so scores are comparable):
+
+```bash
+cd /teamspace/studios/this_studio/isl-arch-baselines
+git pull origin main
+python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn
+```
+
+3-epoch GPU check of the novel model:
+
+```bash
+python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn --smoke
+```
+
+If a previous download died on Hugging Face HTTP 429, re-run the same command (it resumes). Do not pass `--skip-download` unless `/home/zeus/content/ISL_DATASET_40WORDS` already has ~642 mp4s.
+
+Subset of baselines:
 
 ```bash
 python scripts/run_pipeline_baselines.py --skip-clone --models stgcn hwgat ctr_gcn

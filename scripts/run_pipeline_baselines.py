@@ -9,6 +9,7 @@ That downloads vidit031/isl-isolated-40words (~642 clips), extracts landmarks,
 keeps the 8 highest-count glosses, and trains the few-shot protocol
 (7-shot train, 15-clip locked test, 3 train-set draws).
 
+  python scripts/run_pipeline_baselines.py --skip-clone --models kdf_stgcn
   python scripts/run_pipeline_baselines.py --skip-clone --smoke   # 3-epoch GPU check
 
 Do not use WORKDIR — Lightning sets that to a folder that is not this checkout.
@@ -53,14 +54,51 @@ def expected_min_mp4(hf_dataset: str) -> int:
 
 
 def _snapshot_download(repo: str, out: Path, token: str | None) -> None:
+    import time
+
     from huggingface_hub import snapshot_download
 
     out.mkdir(parents=True, exist_ok=True)
-    kwargs = dict(repo_id=repo, repo_type="dataset", local_dir=str(out), token=token)
-    try:
-        snapshot_download(**kwargs, local_dir_use_symlinks=False)
-    except TypeError:
-        snapshot_download(**kwargs)
+    last: Exception | None = None
+    for attempt in range(6):
+        kwargs = dict(
+            repo_id=repo,
+            repo_type="dataset",
+            local_dir=str(out),
+            token=token,
+            max_workers=2,
+            resume_download=True,
+        )
+        try:
+            try:
+                snapshot_download(**kwargs, local_dir_use_symlinks=False)
+            except TypeError:
+                kwargs.pop("resume_download", None)
+                try:
+                    snapshot_download(**kwargs)
+                except TypeError:
+                    snapshot_download(
+                        repo_id=repo,
+                        repo_type="dataset",
+                        local_dir=str(out),
+                        token=token,
+                    )
+            return
+        except Exception as exc:  # noqa: BLE001 — Hub client versions differ
+            last = exc
+            text = str(exc)
+            rate = "429" in text or "rate limit" in text.lower() or "too many requests" in text.lower()
+            if not rate:
+                raise
+            os.environ["HF_HUB_DISABLE_XET"] = "1"
+            wait = min(90, 8 * (2 ** attempt))
+            print(
+                f"Hugging Face 429 (attempt {attempt + 1}/6). "
+                f"Waiting {wait}s then resuming with Xet disabled...",
+                flush=True,
+            )
+            time.sleep(wait)
+    raise last  # type: ignore[misc]
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,6 +310,7 @@ def main() -> None:
                 "cwt_bilstm",
                 "cwt_transformer",
                 "pgf_slr",
+                "kdf_stgcn",
             ]
 
     workers = args.num_workers

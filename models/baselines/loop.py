@@ -16,8 +16,10 @@ from common.engine import append_train_log, evaluate, save_weights, train_one_ep
 from .data import (
     RGBClipDataset,
     SkeletonDataset,
+    KDFSkeletonDataset,
     LandmarkSeqDataset,
     collate_xy,
+    collate_kdf,
     cwt_transform,
     fft_transform,
     pose_hands_transform,
@@ -93,6 +95,26 @@ def make_loaders(
         )
 
     cache = ensure_landmark_cache(t)
+    if spec.modality == "skeleton_kdf":
+        kdf_kw = dict(kw)
+        kdf_kw["collate_fn"] = collate_kdf
+
+        def _mk_kdf(df, augment: bool):
+            return KDFSkeletonDataset(
+                df["abs_path"].tolist(),
+                df["y"].tolist(),
+                cache,
+                t,
+                augment=augment,
+                require_cache=True,
+            )
+
+        return (
+            DataLoader(_mk_kdf(train_df, True), batch_size=bs, shuffle=True, **kdf_kw),
+            DataLoader(_mk_kdf(val_df, False), batch_size=bs, shuffle=False, **kdf_kw),
+            DataLoader(_mk_kdf(test_df, False), batch_size=bs, shuffle=False, **kdf_kw),
+        )
+
     transform = {
         "landmarks": pose_hands_transform,
         "spectral_fft": fft_transform,

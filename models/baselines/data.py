@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from common.landmarks import load_or_extract
 
 from .features import sliding_cwt_features, sliding_fft_features
+from .kdf_stgcn import N_MODES, kdf_joint_features
 from .skeleton import IN_CHANNELS, N_JOINTS, joints_to_bones, landmarks_to_joints, pose_hands_vec
 
 
@@ -117,6 +118,44 @@ class SkeletonDataset(LandmarkSeqDataset):
             bone = np.transpose(joints_to_bones(joints), (2, 0, 1))
             x = np.concatenate([x, bone], axis=0)  # (2C, T, V)
         return torch.from_numpy(np.ascontiguousarray(x)), torch.tensor(self.labels[idx], dtype=torch.long)
+
+
+class KDFSkeletonDataset(LandmarkSeqDataset):
+    """Kalman + Hankel-DMD fused skeleton: ((C, T, V), eig) for kdf_stgcn."""
+
+    def __getitem__(self, idx):
+        seq = load_or_extract(
+            self.paths[idx],
+            self.cache_dir,
+            self.num_frames,
+            require_cache=self.require_cache,
+        ).astype(np.float32)
+        extra = self.cache_dir.parent / f"kdf_T{self.num_frames}_m{N_MODES}"
+        extra.mkdir(parents=True, exist_ok=True)
+        feat_path = extra / f"{Path(self.paths[idx]).stem}.npz"
+        if feat_path.exists():
+            blob = np.load(feat_path)
+            x = blob["x"].astype(np.float32)
+            eig = blob["eig"].astype(np.float32)
+        else:
+            joints = landmarks_to_joints(seq)
+            x, eig = kdf_joint_features(joints)
+            np.savez_compressed(feat_path, x=x, eig=eig)
+        if self.augment:
+            if np.random.rand() < 0.5:
+                x = x + np.random.normal(0, 0.01, size=x.shape).astype(np.float32)
+            if np.random.rand() < 0.5:
+                x = np.roll(x, int(np.random.randint(0, x.shape[1])), axis=1)
+        return (
+            torch.from_numpy(np.ascontiguousarray(x)),
+            torch.from_numpy(np.ascontiguousarray(eig)),
+            torch.tensor(self.labels[idx], dtype=torch.long),
+        )
+
+
+def collate_kdf(batch):
+    xs, eigs, ys = zip(*batch)
+    return (torch.stack(xs, 0), torch.stack(eigs, 0)), torch.stack(ys, 0)
 
 
 class RGBClipDataset(Dataset):

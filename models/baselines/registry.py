@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 import torch.nn as nn
 
 from .skeleton import IN_CHANNELS, N_JOINTS
+from .kdf_stgcn import KDF_IN_CHANNELS, N_MODES, kdf_forward
 
 POSE_HANDS_DIM = (33 + 21 + 21) * 3  # drop face mesh
 JOINT_FLAT_DIM = N_JOINTS * IN_CHANNELS
@@ -25,6 +26,8 @@ TRAIN_KEYS = {
     "feat_dim",
     "in_channels",
     "use_bone",
+    "n_modes",
+    "eig_hidden",
 }
 
 
@@ -49,7 +52,7 @@ def _pgf_forward(model, batch, criterion, device, train: bool = True):
 class BaselineSpec:
     name: str
     title: str
-    modality: str  # rgb | landmarks | skeleton | spectral_fft | spectral_cwt
+    modality: str  # rgb | landmarks | skeleton | skeleton_kdf | spectral_fft | spectral_cwt
     build: Callable[[int, dict[str, Any]], nn.Module]
     defaults: dict[str, Any] = field(default_factory=dict)
     forward_fn: Optional[Callable] = None
@@ -159,6 +162,18 @@ def _cwt_transformer(num_classes: int, cfg: dict) -> nn.Module:
         num_layers=int(cfg.get("layers", 3)),
         dropout=float(cfg.get("dropout", 0.2)),
         max_len=int(cfg.get("num_frames", 64)),
+    )
+
+
+def _kdf_stgcn(num_classes: int, cfg: dict) -> nn.Module:
+    from .kdf_stgcn import KDFSTGCN
+
+    return KDFSTGCN(
+        num_classes=num_classes,
+        in_channels=int(cfg.get("in_channels", KDF_IN_CHANNELS)),
+        n_modes=int(cfg.get("n_modes", N_MODES)),
+        eig_hidden=int(cfg.get("eig_hidden", 32)),
+        dropout=float(cfg.get("dropout", 0.2)),
     )
 
 
@@ -284,6 +299,21 @@ SPECS: dict[str, BaselineSpec] = {
         family="tier3",
         forward_fn=_pgf_forward,
         use_amp=False,
+    ),
+    "kdf_stgcn": BaselineSpec(
+        "kdf_stgcn",
+        "Koopman / Hankel-DMD + kinematic fusion (ST-GCN)",
+        "skeleton_kdf",
+        _kdf_stgcn,
+        defaults=dict(
+            _GRAPH,
+            in_channels=KDF_IN_CHANNELS,
+            n_modes=N_MODES,
+            eig_hidden=32,
+            dropout=0.2,
+        ),
+        family="novel",
+        forward_fn=kdf_forward,
     ),
 }
 
