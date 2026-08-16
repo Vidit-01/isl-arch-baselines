@@ -28,6 +28,8 @@ TRAIN_KEYS = {
     "use_bone",
     "n_modes",
     "eig_hidden",
+    "mixup",
+    "label_smoothing",
 }
 
 
@@ -172,8 +174,10 @@ def _kdf_stgcn(num_classes: int, cfg: dict) -> nn.Module:
         num_classes=num_classes,
         in_channels=int(cfg.get("in_channels", KDF_IN_CHANNELS)),
         n_modes=int(cfg.get("n_modes", N_MODES)),
-        eig_hidden=int(cfg.get("eig_hidden", 32)),
-        dropout=float(cfg.get("dropout", 0.2)),
+        eig_hidden=int(cfg.get("eig_hidden", 64)),
+        dropout=float(cfg.get("dropout", 0.35)),
+        mixup=float(cfg.get("mixup", 0.4)),
+        label_smoothing=float(cfg.get("label_smoothing", 0.1)),
     )
 
 
@@ -309,8 +313,12 @@ SPECS: dict[str, BaselineSpec] = {
             _GRAPH,
             in_channels=KDF_IN_CHANNELS,
             n_modes=N_MODES,
-            eig_hidden=32,
-            dropout=0.2,
+            eig_hidden=64,
+            dropout=0.35,
+            mixup=0.4,
+            label_smoothing=0.1,
+            weight_decay=5e-2,
+            lr=8e-4,
         ),
         family="novel",
         forward_fn=kdf_forward,

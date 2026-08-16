@@ -1,12 +1,9 @@
-"""Kinematic + Hankel-DMD / Koopman fusion into ST-GCN (proposed ISL model).
+"""Kinematic + part-wise Hankel-DMD / Koopman fusion into ST-GCN (proposed ISL model).
 
-Pipeline (matches the comparison-deck novel row):
-  Kalman-smoothed landmarks → delay-embedded Hankel-DMD → Koopman eigendecomposition
-  → fuse pos/vel/acc with spatial graph modes → ST-GCN, plus an eigenvalue head
-    (growth/decay + frequency) that FFT/CWT cannot represent.
-
-Input tensor is (N, C, T, V) with C = 9 + 3*n_modes (kinematics + reconstructed
-modes). Eigenvalues are a separate (N, 2*n_modes) vector: log|λ| and arg(λ)/π.
+v2 (after the first few-shot run overfit: val−test gap 0.36, worse than ST-GCN):
+  ST-GCN stays on 3-channel Kalman-normalized pose — not 21 fused channels.
+  Spatial graph modes enter as a zero-init residual; Koopman eigenvalues FiLM
+  the pooled embedding (identity at init). Mixup + label smoothing for 7-shot.
 """
 from __future__ import annotations
 
@@ -15,17 +12,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .skeleton import PARTS
 from .stgcn import STGCN
 
-N_MODES = 4
-N_DELAYS = 4
-KIN_CHANNELS = 9  # xyz + vel + acc
-MODE_CHANNELS = 3 * N_MODES
-KDF_IN_CHANNELS = KIN_CHANNELS + MODE_CHANNELS  # 21
-EIG_DIM = 2 * N_MODES  # log magnitude + wrapped angle
+CACHE_TAG = "kdfv2"
+N_MODES = 3  # per body part
+N_DELAYS = 8
+PART_ORDER = ("upper", "left_hand", "right_hand")
+N_PARTS = len(PART_ORDER)
+KIN_CHANNELS = 3
+KDF_IN_CHANNELS = KIN_CHANNELS
+FEAT_PER_MODE = 4  # log1p|λ|, sin θ, cos θ, RMS amplitude
+EIG_DIM = N_PARTS * N_MODES * FEAT_PER_MODE + N_PARTS
+MODE_MAP_DIM = N_PARTS * N_MODES  # 9 spatial-mode channels over joints
+FEAT_DIM = 256
 
 
-def _kalman_nd(z: np.ndarray, q: float = 3e-4, r: float = 2e-2) -> np.ndarray:
+def _kalman_nd(z: np.ndarray, q: float = 8e-4, r: float = 1.5e-2) -> np.ndarray:
     """Independent constant-velocity Kalman on each column. z: (T, N) → (T, N)."""
     t_len, n = z.shape
     z64 = np.asarray(z, dtype=np.float64).reshape(t_len, n)
@@ -73,7 +76,7 @@ def _interp_missing_matrix(joints: np.ndarray, missing: np.ndarray) -> np.ndarra
     return out
 
 
-def kalman_smooth_joints(joints: np.ndarray, q: float = 3e-4, r: float = 2e-2) -> np.ndarray:
+def kalman_smooth_joints(joints: np.ndarray, q: float = 8e-4, r: float = 1.5e-2) -> np.ndarray:
     """Occlusion fill + forward–backward Kalman on (T, V, C) trajectories."""
     t_len, n_j, n_c = joints.shape
     missing = np.linalg.norm(joints, axis=-1) < 1e-6
@@ -81,6 +84,17 @@ def kalman_smooth_joints(joints: np.ndarray, q: float = 3e-4, r: float = 2e-2) -
     fwd = _kalman_nd(filled, q=q, r=r)
     bwd = _kalman_nd(fwd[::-1], q=q, r=r)[::-1]
     return (0.5 * (fwd + bwd)).reshape(t_len, n_j, n_c).astype(np.float32)
+
+
+def normalize_joints(joints: np.ndarray) -> np.ndarray:
+    """Root-center at the nose and scale by mean shoulder width."""
+    x = joints.astype(np.float32, copy=True)
+    x = x - x[:, :1, :]
+    shoulder = np.linalg.norm(x[:, 1] - x[:, 2], axis=-1)
+    scale = float(np.nanmean(shoulder))
+    if not np.isfinite(scale) or scale < 1e-4:
+        scale = float(np.std(x) * 2.0 + 1e-3)
+    return (x / scale).astype(np.float32)
 
 
 def _hankel(x: np.ndarray, delays: int) -> np.ndarray:
@@ -96,143 +110,209 @@ def _hankel(x: np.ndarray, delays: int) -> np.ndarray:
 def hankel_dmd(x: np.ndarray, delays: int = N_DELAYS, rank: int = N_MODES):
     """Exact DMD on a delay-embedded Hankel matrix.
 
-    x: (D, T)  →  spatial modes (D, r), time coeffs (r, T), eigs (r,)
+    x: (D, T)  →  |spatial| (D, r), |amp| (r, T), eigs (r,)
+    Modes are ordered oscillatory-first so clips align better than raw |λ|.
     """
     x64 = np.asarray(x, dtype=np.float64)
     dim, t_len = x64.shape
     delays = int(max(2, min(int(delays), max(2, t_len // 3))))
+    empty = (
+        np.zeros((dim, rank), dtype=np.float32),
+        np.zeros((rank, t_len), dtype=np.float32),
+        np.zeros(rank, dtype=np.complex64),
+    )
     if t_len < delays + 2 or dim < 1:
-        return (
-            np.zeros((dim, rank), dtype=np.float32),
-            np.zeros((rank, t_len), dtype=np.float32),
-            np.zeros(rank, dtype=np.complex64),
-        )
+        return empty
     h0 = _hankel(x64[:, :-1], delays)
     h1 = _hankel(x64[:, 1:], delays)
     cols = min(h0.shape[1], h1.shape[1])
     if cols < 2:
-        return (
-            np.zeros((dim, rank), dtype=np.float32),
-            np.zeros((rank, t_len), dtype=np.float32),
-            np.zeros(rank, dtype=np.complex64),
-        )
+        return empty
     h0, h1 = h0[:, :cols], h1[:, :cols]
     u, s, vh = np.linalg.svd(h0, full_matrices=False)
     r = int(min(rank, u.shape[1], max(1, int((s > 1e-6).sum()))))
     u, s, vh = u[:, :r], s[:r], vh[:r]
     k = u.T @ h1 @ vh.T @ np.diag(1.0 / np.clip(s, 1e-8, None))
     eigvals, eigvecs = np.linalg.eig(k)
-    order = np.argsort(-np.abs(eigvals))
+    order = np.lexsort((-np.abs(eigvals), -np.abs(np.angle(eigvals))))
     eigvals, eigvecs = eigvals[order], eigvecs[:, order]
-    phi = np.real(u @ eigvecs)  # (D*delays, r) delay-embedded spatial modes
-    spatial = phi[:dim, :r]
-    amp = np.linalg.pinv(spatial) @ x64  # (r, T)
+    phi = u @ eigvecs
+    spatial_c = phi[:dim, :r]
+    mag = np.clip(np.abs(eigvals), 0.5, 1.5)
+    lam = mag * np.exp(1j * np.angle(eigvals))
+    try:
+        b0 = np.linalg.pinv(spatial_c, rcond=1e-6) @ x64[:, 0]
+    except np.linalg.LinAlgError:
+        b0 = np.zeros(r, dtype=np.complex128)
+    t_idx = np.arange(t_len, dtype=np.float64)
+    amp = np.zeros((r, t_len), dtype=np.float64)
+    for i in range(r):
+        amp[i] = np.abs(b0[i] * np.power(lam[i], t_idx))
+    spatial = np.abs(spatial_c).astype(np.float32)
     if spatial.shape[1] < rank:
         pad = rank - spatial.shape[1]
         spatial = np.pad(spatial, ((0, 0), (0, pad)))
         amp = np.pad(amp, ((0, pad), (0, 0)))
         eigvals = np.concatenate([eigvals, np.zeros(pad, dtype=np.complex128)])
     return (
-        spatial[:, :rank].astype(np.float32),
+        spatial[:, :rank],
         amp[:rank].astype(np.float32),
         np.asarray(eigvals[:rank], dtype=np.complex64),
     )
 
 
-def eig_features(eigs: np.ndarray, n_modes: int = N_MODES) -> np.ndarray:
-    """log|λ| (growth/decay) and arg(λ)/π (frequency). Shape (2 * n_modes,)."""
-    z = np.zeros(n_modes, dtype=np.complex64)
-    n = min(n_modes, int(np.asarray(eigs).size))
-    z[:n] = np.asarray(eigs, dtype=np.complex64).ravel()[:n]
-    mag = np.log1p(np.abs(z)).astype(np.float32)
-    ang = (np.angle(z) / np.pi).astype(np.float32)
-    return np.concatenate([mag, ang], axis=0)
+def _part_spectrum(eigs: np.ndarray, amp: np.ndarray, n_modes: int) -> np.ndarray:
+    """log|λ|, sin θ, cos θ, RMS amp for one body part. Shape (n_modes * 4,)."""
+    out = np.zeros(n_modes * FEAT_PER_MODE, dtype=np.float32)
+    z = np.asarray(eigs).ravel()
+    for i in range(n_modes):
+        base = i * FEAT_PER_MODE
+        out[base + 2] = 1.0
+        if i >= z.size:
+            continue
+        val = complex(z[i])
+        ang = np.angle(val)
+        out[base] = np.log1p(abs(val))
+        out[base + 1] = np.sin(ang)
+        out[base + 2] = np.cos(ang)
+        if amp is not None and i < amp.shape[0]:
+            out[base + 3] = float(np.sqrt(np.mean(np.square(amp[i]))))
+    return out
 
 
 def kdf_joint_features(
     joints: np.ndarray,
     n_modes: int = N_MODES,
     delays: int = N_DELAYS,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Kalman + kinematics + Hankel-DMD spatial modes.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Kalman + signer-normalized pose, part-wise Hankel-DMD.
 
     joints: (T, V, 3)
     returns:
-      x:   (C, T, V) with C = 9 + 3*n_modes
-      eig: (2*n_modes,)
+      x:     (3, T, V)  Kalman-smoothed, root-centered pose
+      eig:   (EIG_DIM,) part-wise Koopman spectrum + part kinetic energy
+      modes: (V, MODE_MAP_DIM) spatial graph-mode energy per joint
     """
     joints = np.asarray(joints, dtype=np.float32)
     t_len, n_j, n_c = joints.shape
-    smooth = kalman_smooth_joints(joints)
+    smooth = normalize_joints(kalman_smooth_joints(joints))
     vel = np.diff(smooth, axis=0, prepend=smooth[:1])
-    acc = np.diff(vel, axis=0, prepend=vel[:1])
-    kin = np.concatenate([smooth, vel, acc], axis=-1)  # (T, V, 9)
-
-    flat = smooth.reshape(t_len, n_j * n_c).T  # (D, T)
-    spatial, amp, eigs = hankel_dmd(flat, delays=delays, rank=n_modes)
-    # spatial: (D, r) → (V, 3, r); amp: (r, T)
-    modes = np.zeros((t_len, n_j, 3 * n_modes), dtype=np.float32)
-    for i in range(n_modes):
-        pattern = spatial[:, i].reshape(n_j, n_c)  # (V, 3)
-        coeff = amp[i]  # (T,)
-        modes[:, :, i * 3 : (i + 1) * 3] = pattern[None, :, :] * coeff[:, None, None]
-
-    fused = np.concatenate([kin, modes], axis=-1)  # (T, V, C)
-    x = np.transpose(fused, (2, 0, 1)).astype(np.float32)  # (C, T, V)
-    return x, eig_features(eigs, n_modes=n_modes)
+    mode_map = np.zeros((n_j, N_PARTS * n_modes), dtype=np.float32)
+    spec_parts: list[np.ndarray] = []
+    kinetic: list[float] = []
+    for p, name in enumerate(PART_ORDER):
+        idx = list(PARTS[name])
+        sub = smooth[:, idx, :]
+        spatial, amp, eigs = hankel_dmd(sub.reshape(t_len, -1).T, delays=delays, rank=n_modes)
+        vp = len(idx)
+        spat = spatial.reshape(vp, n_c, -1).mean(axis=1)  # (Vp, r)
+        for i in range(n_modes):
+            col = spat[:, i]
+            peak = float(col.max()) + 1e-6
+            mode_map[idx, p * n_modes + i] = col / peak
+        spec_parts.append(_part_spectrum(eigs, amp, n_modes))
+        kinetic.append(float(np.sqrt(np.mean(np.square(vel[:, idx])))))
+    eig = np.concatenate([*spec_parts, np.asarray(kinetic, dtype=np.float32)], axis=0)
+    x = np.transpose(smooth, (2, 0, 1)).astype(np.float32)
+    return x, eig.astype(np.float32), mode_map.astype(np.float32)
 
 
 class KDFSTGCN(nn.Module):
-    """ST-GCN on fused kinematic/DMD joint channels + Koopman eigenvalue head."""
+    """ST-GCN on 3-ch pose; spatial DMD residual + Koopman FiLM (identity at init)."""
 
     def __init__(
         self,
         num_classes: int,
         in_channels: int = KDF_IN_CHANNELS,
         n_modes: int = N_MODES,
-        eig_hidden: int = 32,
-        dropout: float = 0.2,
+        eig_hidden: int = 64,
+        dropout: float = 0.35,
+        mixup: float = 0.4,
+        label_smoothing: float = 0.1,
         **_ignored,
     ):
         super().__init__()
         self.n_modes = int(n_modes)
+        self.mixup = float(mixup)
+        self.label_smoothing = float(label_smoothing)
         self.backbone = STGCN(num_classes=num_classes, in_channels=in_channels, dropout=dropout)
-        self.eig_mlp = nn.Sequential(
-            nn.LayerNorm(2 * self.n_modes),
-            nn.Linear(2 * self.n_modes, eig_hidden),
+        self.mode_lift = nn.Conv2d(MODE_MAP_DIM, in_channels, kernel_size=1, bias=True)
+        nn.init.zeros_(self.mode_lift.weight)
+        nn.init.zeros_(self.mode_lift.bias)
+        self.film = nn.Sequential(
+            nn.LayerNorm(EIG_DIM),
+            nn.Linear(EIG_DIM, eig_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
+            nn.Linear(eig_hidden, FEAT_DIM * 2),
         )
-        self.fuse = nn.Sequential(
+        nn.init.zeros_(self.film[-1].weight)
+        nn.init.zeros_(self.film[-1].bias)
+        self.head = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(256 + eig_hidden, num_classes),
+            nn.Linear(FEAT_DIM, num_classes),
         )
 
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, modes: torch.Tensor | None = None) -> torch.Tensor:
         n, c, t, v = x.shape
+        if modes is not None:
+            lifted = self.mode_lift(modes.permute(0, 2, 1).unsqueeze(2).expand(-1, -1, t, -1))
+            x = x + lifted
         x = self.backbone.data_bn(x.reshape(n, c * v, t)).reshape(n, c, t, v)
         x = self.backbone.blocks(x)
         return F.adaptive_avg_pool2d(x, 1).reshape(n, -1)
 
-    def forward(self, x: torch.Tensor, eig: torch.Tensor | None = None) -> torch.Tensor:
-        feat = self.encode(x)
-        if eig is None:
-            return self.backbone.head(feat)
-        return self.fuse(torch.cat([feat, self.eig_mlp(eig)], dim=-1))
+    def forward(
+        self,
+        x: torch.Tensor,
+        eig: torch.Tensor | None = None,
+        modes: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        feat = self.encode(x, modes)
+        if eig is not None:
+            gamma, beta = self.film(eig).chunk(2, dim=-1)
+            feat = feat * (1.0 + torch.tanh(gamma)) + beta
+        return self.head(feat)
+
+
+def _ce(logits, y, criterion, smoothing: float):
+    return F.cross_entropy(
+        logits,
+        y,
+        weight=getattr(criterion, "weight", None),
+        label_smoothing=float(smoothing),
+    )
 
 
 def kdf_forward(model, batch, criterion, device, train: bool = True):
-    """Unpack (joint_features, koopman_eigs) from the KDF collate."""
+    """Unpack (pose, koopman_eigs, spatial_modes); mixup while training."""
     x, y = batch
     if isinstance(x, (tuple, list)):
-        joints, eig = x
+        joints, eig = x[0], x[1]
+        modes = x[2] if len(x) > 2 else None
         joints = joints.to(device, non_blocking=True)
         eig = eig.to(device, non_blocking=True)
+        if modes is not None:
+            modes = modes.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-        logits = model(joints, eig)
     else:
-        x = x.to(device, non_blocking=True)
+        joints = x.to(device, non_blocking=True)
+        eig, modes = None, None
         y = y.to(device, non_blocking=True)
-        logits = model(x)
-    loss = criterion(logits, y)
-    return logits, y, loss
+
+    mix = float(getattr(model, "mixup", 0.0) or 0.0) if train and model.training else 0.0
+    smooth = float(getattr(model, "label_smoothing", 0.0) or 0.0) if train else 0.0
+    if mix > 0.0 and joints.size(0) > 1:
+        lam = float(np.random.beta(mix, mix))
+        idx = torch.randperm(joints.size(0), device=device)
+        joints = lam * joints + (1.0 - lam) * joints[idx]
+        if eig is not None:
+            eig = lam * eig + (1.0 - lam) * eig[idx]
+        if modes is not None:
+            modes = lam * modes + (1.0 - lam) * modes[idx]
+        logits = model(joints, eig, modes)
+        loss = lam * _ce(logits, y, criterion, smooth) + (1.0 - lam) * _ce(logits, y[idx], criterion, smooth)
+        return logits, y, loss
+
+    logits = model(joints, eig, modes)
+    return logits, y, _ce(logits, y, criterion, smooth)

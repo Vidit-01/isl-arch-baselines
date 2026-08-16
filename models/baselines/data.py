@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 from common.landmarks import load_or_extract
 
 from .features import sliding_cwt_features, sliding_fft_features
-from .kdf_stgcn import N_MODES, kdf_joint_features
+from .kdf_stgcn import CACHE_TAG, KDF_IN_CHANNELS, N_MODES, kdf_joint_features
 from .skeleton import IN_CHANNELS, N_JOINTS, joints_to_bones, landmarks_to_joints, pose_hands_vec
 
 
@@ -121,7 +121,7 @@ class SkeletonDataset(LandmarkSeqDataset):
 
 
 class KDFSkeletonDataset(LandmarkSeqDataset):
-    """Kalman + Hankel-DMD fused skeleton: ((C, T, V), eig) for kdf_stgcn."""
+    """Kalman pose + part-wise Hankel-DMD: ((C,T,V), eig, modes) for kdf_stgcn."""
 
     def __getitem__(self, idx):
         seq = load_or_extract(
@@ -130,32 +130,37 @@ class KDFSkeletonDataset(LandmarkSeqDataset):
             self.num_frames,
             require_cache=self.require_cache,
         ).astype(np.float32)
-        extra = self.cache_dir.parent / f"kdf_T{self.num_frames}_m{N_MODES}"
+        extra = self.cache_dir.parent / f"{CACHE_TAG}_T{self.num_frames}_m{N_MODES}"
         extra.mkdir(parents=True, exist_ok=True)
         feat_path = extra / f"{Path(self.paths[idx]).stem}.npz"
+        x = eig = modes = None
         if feat_path.exists():
             blob = np.load(feat_path)
-            x = blob["x"].astype(np.float32)
-            eig = blob["eig"].astype(np.float32)
-        else:
+            if "x" in blob and "eig" in blob and "modes" in blob and blob["x"].shape[0] == KDF_IN_CHANNELS:
+                x = blob["x"].astype(np.float32)
+                eig = blob["eig"].astype(np.float32)
+                modes = blob["modes"].astype(np.float32)
+        if x is None:
             joints = landmarks_to_joints(seq)
-            x, eig = kdf_joint_features(joints)
-            np.savez_compressed(feat_path, x=x, eig=eig)
+            x, eig, modes = kdf_joint_features(joints)
+            np.savez_compressed(feat_path, x=x, eig=eig, modes=modes)
         if self.augment:
             if np.random.rand() < 0.5:
                 x = x + np.random.normal(0, 0.01, size=x.shape).astype(np.float32)
             if np.random.rand() < 0.5:
-                x = np.roll(x, int(np.random.randint(0, x.shape[1])), axis=1)
+                shift = int(np.random.randint(0, x.shape[1]))
+                x = np.roll(x, shift, axis=1)
         return (
             torch.from_numpy(np.ascontiguousarray(x)),
             torch.from_numpy(np.ascontiguousarray(eig)),
+            torch.from_numpy(np.ascontiguousarray(modes)),
             torch.tensor(self.labels[idx], dtype=torch.long),
         )
 
 
 def collate_kdf(batch):
-    xs, eigs, ys = zip(*batch)
-    return (torch.stack(xs, 0), torch.stack(eigs, 0)), torch.stack(ys, 0)
+    xs, eigs, modes, ys = zip(*batch)
+    return (torch.stack(xs, 0), torch.stack(eigs, 0), torch.stack(modes, 0)), torch.stack(ys, 0)
 
 
 class RGBClipDataset(Dataset):
