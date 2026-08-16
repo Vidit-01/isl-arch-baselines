@@ -25,60 +25,62 @@ KDF_IN_CHANNELS = KIN_CHANNELS + MODE_CHANNELS  # 21
 EIG_DIM = 2 * N_MODES  # log magnitude + wrapped angle
 
 
-def _const_vel_kalman(z: np.ndarray, q: float = 3e-4, r: float = 2e-2) -> np.ndarray:
-    """1D constant-velocity Kalman. z: (T,) → filtered position."""
-    t_len = int(z.shape[0])
-    x = np.array([float(z[0]), 0.0], dtype=np.float64)
-    p = np.eye(2, dtype=np.float64)
-    f = np.array([[1.0, 1.0], [0.0, 1.0]], dtype=np.float64)
-    h = np.array([[1.0, 0.0]], dtype=np.float64)
-    qq = q * np.array([[0.25, 0.5], [0.5, 1.0]], dtype=np.float64)
-    rr = np.array([[r]], dtype=np.float64)
-    out = np.empty(t_len, dtype=np.float64)
-    i2 = np.eye(2, dtype=np.float64)
+def _kalman_nd(z: np.ndarray, q: float = 3e-4, r: float = 2e-2) -> np.ndarray:
+    """Independent constant-velocity Kalman on each column. z: (T, N) → (T, N)."""
+    t_len, n = z.shape
+    z64 = np.asarray(z, dtype=np.float64).reshape(t_len, n)
+    pos = z64[0].copy()
+    vel = np.zeros(n, dtype=np.float64)
+    p11 = np.ones(n, dtype=np.float64)
+    p12 = np.zeros(n, dtype=np.float64)
+    p22 = np.ones(n, dtype=np.float64)
+    q11, q12, q22 = 0.25 * q, 0.5 * q, q
+    out = np.empty_like(z64)
+    r = float(r)
     for t in range(t_len):
-        x = f @ x
-        p = f @ p @ f.T + qq
-        y = float(z[t]) - float(h @ x)
-        s = float(h @ p @ h.T) + r
-        k = (p @ h.T) / max(s, 1e-12)
-        x = x + k.ravel() * y
-        p = (i2 - k @ h) @ p
-        out[t] = x[0]
-        _ = rr  # kept for the measurement model documentation
+        pos = pos + vel
+        p11 = p11 + 2.0 * p12 + p22 + q11
+        p12 = p12 + p22 + q12
+        p22 = p22 + q22
+        innov = z64[t] - pos
+        s = np.maximum(p11 + r, 1e-12)
+        k0 = p11 / s
+        k1 = p12 / s
+        pos = pos + k0 * innov
+        vel = vel + k1 * innov
+        n11 = (1.0 - k0) * p11
+        n12 = (1.0 - k0) * p12
+        n21 = -k1 * p11 + p12
+        n22 = -k1 * p12 + p22
+        p11 = n11
+        p12 = 0.5 * (n12 + n21)
+        p22 = n22
+        out[t] = pos
     return out.astype(np.float32)
 
 
-def _interp_missing(z: np.ndarray, missing: np.ndarray) -> np.ndarray:
-    """Linearly fill occluded samples along time. z/missing: (T,)."""
-    good = ~missing
-    if int(good.sum()) == 0:
-        return z.astype(np.float32)
-    if bool(good.all()):
-        return z.astype(np.float32)
-    idx = np.arange(z.shape[0], dtype=np.float64)
-    filled = np.interp(idx, idx[good], z[good].astype(np.float64))
-    return filled.astype(np.float32)
+def _interp_missing_matrix(joints: np.ndarray, missing: np.ndarray) -> np.ndarray:
+    """Fill occluded joints along time. joints: (T, V, C), missing: (T, V)."""
+    out = joints.astype(np.float32, copy=True)
+    t_idx = np.arange(joints.shape[0], dtype=np.float64)
+    for v in range(joints.shape[1]):
+        miss = missing[:, v]
+        if not bool(miss.any()) or bool(miss.all()):
+            continue
+        good = ~miss
+        for c in range(joints.shape[2]):
+            out[:, v, c] = np.interp(t_idx, t_idx[good], joints[good, v, c].astype(np.float64))
+    return out
 
 
 def kalman_smooth_joints(joints: np.ndarray, q: float = 3e-4, r: float = 2e-2) -> np.ndarray:
     """Occlusion fill + forward–backward Kalman on (T, V, C) trajectories."""
     t_len, n_j, n_c = joints.shape
-    filled = joints.astype(np.float32, copy=True)
-    missing_joint = np.linalg.norm(joints, axis=-1) < 1e-6  # (T, V)
-    for v in range(n_j):
-        miss = missing_joint[:, v]
-        if not bool(miss.any()):
-            continue
-        for c in range(n_c):
-            filled[:, v, c] = _interp_missing(filled[:, v, c], miss)
-    fwd = np.empty_like(filled)
-    bwd = np.empty_like(filled)
-    for v in range(n_j):
-        for c in range(n_c):
-            fwd[:, v, c] = _const_vel_kalman(filled[:, v, c], q=q, r=r)
-            bwd[:, v, c] = _const_vel_kalman(fwd[::-1, v, c], q=q, r=r)[::-1]
-    return (0.5 * (fwd + bwd)).astype(np.float32)
+    missing = np.linalg.norm(joints, axis=-1) < 1e-6
+    filled = _interp_missing_matrix(joints, missing).reshape(t_len, n_j * n_c)
+    fwd = _kalman_nd(filled, q=q, r=r)
+    bwd = _kalman_nd(fwd[::-1], q=q, r=r)[::-1]
+    return (0.5 * (fwd + bwd)).reshape(t_len, n_j, n_c).astype(np.float32)
 
 
 def _hankel(x: np.ndarray, delays: int) -> np.ndarray:

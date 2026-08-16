@@ -7,7 +7,10 @@ from typing import Any, Optional
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler
+try:
+    from torch.amp import GradScaler
+except ImportError:  # torch < 2.1
+    from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from common import CACHE_DIR, CHECKPOINT_DIR, WEIGHTS_DIR, save_json
@@ -163,7 +166,11 @@ class Trainer:
         )
         self.sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.opt, T_max=int(cfg["epochs"]))
         self.use_amp = bool(spec.use_amp)
-        self.scaler = GradScaler(enabled=device.type == "cuda" and self.use_amp)
+        amp_on = device.type == "cuda" and self.use_amp
+        try:
+            self.scaler = GradScaler("cuda", enabled=amp_on)
+        except TypeError:
+            self.scaler = GradScaler(enabled=amp_on)
         self.forward_fn = spec.forward_fn
 
     def fit(
